@@ -147,6 +147,7 @@ def main():
 
     rpc = DocRpc(hc)
     terminal = None
+    created_space = None
     try:
         # Step 0: idempotency pre-check, before creating anything.
         value, _version = rpc.get_doc()
@@ -189,6 +190,7 @@ def main():
         new_value = dict(value)
         new_value["spaces"] = list(value.get("spaces", [])) + [new_space]
         rpc.call("doc.set", {"name": DOC_NAME, "version": version, "value": new_value})
+        created_space = sp
         print("precreate: wrote space %s (%s) referencing %s" % (sp, args.space_name, terminal))
 
         # Step 4: only now label the terminal into the space.
@@ -208,6 +210,29 @@ def main():
             print("precreate: rolling back terminal %s" % terminal, file=sys.stderr)
             run_hc(hc, ["kill", terminal], check=False)
             run_hc(hc, ["rm", terminal], check=False)
+        if created_space and terminal:
+            # doc.set already landed: remove the space again too, so no
+            # half-created space is left pointing at a dead terminal.
+            try:
+                for _attempt in range(3):
+                    value, version = rpc.get_doc()
+                    kept = [s for s in value.get("spaces", [])
+                            if s.get("id") != created_space]
+                    if len(kept) == len(value.get("spaces", [])):
+                        break
+                    new_value = dict(value)
+                    new_value["spaces"] = kept
+                    try:
+                        rpc.call("doc.set", {"name": DOC_NAME,
+                                             "version": version, "value": new_value})
+                        print("precreate: rolled back space %s" % created_space,
+                              file=sys.stderr)
+                        break
+                    except RuntimeError:
+                        continue  # CAS conflict: re-read and retry
+            except Exception as rb_exc:
+                print("precreate: warning: space rollback failed: %s" % rb_exc,
+                      file=sys.stderr)
         rpc.close()
 
 
