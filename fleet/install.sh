@@ -193,8 +193,8 @@ install_core() {
             cat >&2 <<EOF
 install: error: cannot download the release manifest:
   $MANIFEST_URL
-The aimachy/herdr-core fork has not published a GitHub Release yet, so
-the default download path cannot work today. Use one of the explicit
+The release manifest could not be downloaded from that URL, so the
+default download path cannot work right now. Use one of the explicit
 delivery paths instead:
   * build or download herdr-core on another machine, copy it to this
     host, and re-run:  install.sh --core-bin <file>
