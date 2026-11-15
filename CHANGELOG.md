@@ -2,9 +2,9 @@
 
 ## Unreleased
 
-## [0.1.21.1] - 2026-11-15
+## [0.1.22] - 2026-11-15
 
-The first release of the aimachy fork (fleet-0.1.21.1), from the fleet branch.
+The first release of the aimachy fork (fleet-0.1.22, upstream 0.1.21 plus the fleet changes), from the fleet branch. The version is a plain three-part number because the updater compares only three parts; a fourth part would compare equal to 0.1.21 and never be offered.
 
 ### New
 - **A subscription can name the documents it wants, instead of receiving every one.** `hc events --doc <name>` (repeatable; a name ending in `*` is a prefix) delivers only those document changes, so a program that watches a single document no longer has every document change from every terminal delivered to it, and no longer has to filter them out itself. A subscriber that names none behaves exactly as before and still hears them all; a subscriber that selects a terminal and also names documents hears both.
