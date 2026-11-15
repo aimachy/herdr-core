@@ -33,10 +33,10 @@ By default herdr-core comes from the fork's GitHub Releases manifest
 picked by platform target (`linux-x86_64`, `linux-aarch64`, `macos-aarch64`,
 …) and verified against the manifest's sha256 before unpacking.
 
-> **Current status:** the fork has not published a GitHub Release yet, so
-> the default path fails today. The script says so plainly and points at
-> the two explicit paths below — it never pretends to have installed
-> anything. Once a release exists, this path works unchanged.
+> **Current status:** the fork's first GitHub Release (v0.1.22) is
+> published, so the default path works. If no release were reachable,
+> the script would say so plainly and point at the two explicit paths
+> below — it never pretends to have installed anything.
 
 ## Delivery path B: download elsewhere, upload, install from the file
 
@@ -117,3 +117,11 @@ terminal, the next run repairs the space in place — see below.
   terminal.
 - The script downloads into a temporary directory that is always cleaned
   up, on success and on failure alike.
+
+## Full install guide
+
+This file documents only the scripts in this directory. The complete
+walkthrough — server setup, building and installing the desktop app,
+adding a machine with a password, updating, and troubleshooting — is
+[INSTALL.md](https://github.com/aimachy/herdr-app/blob/fleet/INSTALL.md)
+in the herdr-app fork.
