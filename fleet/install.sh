@@ -4,7 +4,10 @@
 # Installs, entirely under $HOME and with no sudo:
 #   1. herdr-core  -> ~/.local/bin/herdr-core (plus an `hc` symlink)
 #   2. Pi          -> the npm package @mariozechner/pi-coding-agent
-#   3. a pre-created herdr-app space whose terminal runs Pi
+#   3. a Pi extension that reports Pi's state to Herdr over OSC 7501
+#      (pi-herdr-status.ts, next to this script), so the desktop app
+#      can show the Pi terminal's status badge
+#   4. a pre-created herdr-app space whose terminal runs Pi
 #      (via precreate.py, next to this script)
 #
 # This script NEVER writes an API key and NEVER touches any .env file.
@@ -23,6 +26,7 @@ CORE_SHA256=""
 PI_PACKAGE="@mariozechner/pi-coding-agent"
 SKIP_CORE=0
 SKIP_PI=0
+SKIP_PI_STATUS=0
 SKIP_SPACE=0
 SPACE_NAME=""
 TERMINAL_NAME="pi"
@@ -47,6 +51,8 @@ usage: install.sh [options]
   --skip-core           do not install/update herdr-core
   --pi-package <name>   npm package for Pi (default: @mariozechner/pi-coding-agent)
   --skip-pi             do not install Pi
+  --skip-pi-status      do not install the Pi status extension
+                        (pi-herdr-status.ts -> ~/.pi/agent/extensions/)
   --space-name <name>   pre-created space name (default: hostname)
   --terminal-name <n>   terminal name (default: pi)
   --pi-cmd <cmd>        command the pre-created terminal runs (default: pi)
@@ -66,6 +72,7 @@ while [ $# -gt 0 ]; do
         --pi-cmd)      [ $# -ge 2 ] || die "--pi-cmd needs a value"; PI_CMD=$2; shift 2 ;;
         --skip-core)   SKIP_CORE=1; shift ;;
         --skip-pi)     SKIP_PI=1; shift ;;
+        --skip-pi-status) SKIP_PI_STATUS=1; shift ;;
         --skip-space)  SKIP_SPACE=1; shift ;;
         -h|--help)     usage; exit 0 ;;
         *)             die "unknown option: $1 (try --help)" ;;
@@ -362,6 +369,25 @@ install_pi() {
     say "install: pi installed: $(pi --version 2>&1 || echo '(version unknown)')"
 }
 
+# ------------------------------------------------------- pi status ext
+# Pi takes its Herdr status only from OSC 7501 reports in its own
+# output; the extension in pi-herdr-status.ts emits them at Pi's
+# lifecycle points. A Pi that is already running picks the extension
+# up with /reload; a Pi started later loads it at startup.
+install_pi_status() {
+    src="$SCRIPT_DIR/pi-herdr-status.ts"
+    [ -f "$src" ] || die "pi-herdr-status.ts not found next to install.sh ($SCRIPT_DIR) (or re-run with --skip-pi-status)"
+    dest_dir="$HOME/.pi/agent/extensions"
+    dest="$dest_dir/herdr-status.ts"
+    if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
+        say "install: pi status extension already installed; skipping"
+        return 0
+    fi
+    mkdir -p "$dest_dir"
+    cp "$src" "$dest"
+    say "install: pi status extension installed to $dest (a running Pi needs /reload to pick it up)"
+}
+
 # ---------------------------------------------------------------- space
 precreate_space() {
     [ -f "$SCRIPT_DIR/precreate.py" ] || die "precreate.py not found next to install.sh ($SCRIPT_DIR)"
@@ -381,6 +407,7 @@ precreate_space() {
 [ "$SKIP_CORE" -eq 1 ] && say "install: --skip-core: leaving herdr-core as-is" || install_core
 ensure_runtime_context
 [ "$SKIP_PI" -eq 1 ] && say "install: --skip-pi: leaving Pi as-is" || install_pi
+[ "$SKIP_PI_STATUS" -eq 1 ] && say "install: --skip-pi-status: no Pi status extension" || install_pi_status
 [ "$SKIP_SPACE" -eq 1 ] && say "install: --skip-space: no space pre-created" || precreate_space
 say "install: done."
 say "install: note: no API key was written anywhere; configure Pi's provider credentials yourself."

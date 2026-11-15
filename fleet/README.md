@@ -5,7 +5,10 @@ Server-side install scripts for a Fleet worker VPS. Running `install.sh`
 
 1. **herdr-core** at `~/.local/bin/herdr-core`, plus an `hc` symlink.
 2. **Pi** — the npm package `@mariozechner/pi-coding-agent` (body only).
-3. **A pre-created herdr-app space** whose single terminal runs Pi, so the
+3. **A Pi status extension** at `~/.pi/agent/extensions/herdr-status.ts`,
+   so the desktop app shows the Pi terminal's status badge (see
+   "Pi status badge" below).
+4. **A pre-created herdr-app space** whose single terminal runs Pi, so the
    Herdr desktop app shows the machine with a named space and a live Pi
    terminal the moment it connects. The space is written with the exact
    sequence verified in Spike B2: create the terminal with no labels,
@@ -43,7 +46,7 @@ picked by platform target (`linux-x86_64`, `linux-aarch64`, `macos-aarch64`,
 ```sh
 # on your own computer: get a herdr-core binary for the VPS's platform,
 # then upload the binary and this fleet/ directory
-scp herdr-core install.sh precreate.py user@vps:~/
+scp herdr-core install.sh precreate.py pi-herdr-status.ts user@vps:~/
 # on the VPS
 sh install.sh --core-bin ~/herdr-core
 ```
@@ -68,6 +71,7 @@ taken; anything else is treated as the raw binary.
 | `--skip-core` | — | don't install/update herdr-core |
 | `--pi-package <name>` | `@mariozechner/pi-coding-agent` | npm package installed as Pi |
 | `--skip-pi` | — | don't install Pi |
+| `--skip-pi-status` | — | don't install the Pi status extension |
 | `--space-name <name>` | hostname | name of the pre-created space |
 | `--terminal-name <n>` | `pi` | name of the pre-created terminal |
 | `--pi-cmd <cmd>` | `pi` | command the pre-created terminal runs |
@@ -77,6 +81,36 @@ Pi step behavior: if `pi` is already on `PATH`, its version is reported
 and the step is skipped. Otherwise Pi is installed with
 `npm install -g <package>`; with no `npm` on `PATH` the script stops with
 a clear error (install Node.js first, or use `--skip-pi`).
+
+## Pi status badge (OSC 7501)
+
+Herdr's core takes a terminal's agent status **only** from OSC 7501
+reports in the terminal's own output stream — it does no screen
+detection and keeps no agent registry. Pi never sends those reports,
+so without help a Pi terminal's `status` stays `null` and the desktop
+app shows no badge. The fix ships with the installer:
+`pi-herdr-status.ts` is a plain Pi extension (Pi auto-discovers
+`~/.pi/agent/extensions/*.ts`) that writes the reports at Pi's
+lifecycle points, the same way Pi's own example extensions write OSC
+sequences:
+
+| Pi event | OSC 7501 report |
+| --- | --- |
+| `session_start` | `state=idle` |
+| `agent_start` (once per prompt) | `state=working` |
+| `agent_end` | `state=done` (`state=error` if the run failed) |
+| `session_shutdown` | `state=clear` |
+
+With that, `hc get` on the Pi terminal shows `reported: true` and a
+live `status`, the core counts turns, and the desktop app lights the
+badge (working while Pi runs; a finished turn shows as needing
+attention until it is looked at). A Pi that was already running when
+the extension was installed picks it up with `/reload` — no restart
+needed. Outside Herdr the sequence is inert: terminals that do not
+know OSC 7501 ignore it. One honest limit: Pi has no built-in
+permission prompt to hook, so the extension never reports `blocked`;
+a prompt that waits for the person reads as `done`/`idle`, not as a
+question.
 
 ## Login sessions, linger and the core's socket (Linux)
 
@@ -105,7 +139,8 @@ terminal, the next run repairs the space in place — see below.
 
 ## Idempotency and rollback
 
-- Re-running `install.sh` is safe: an existing Pi is skipped, and
+- Re-running `install.sh` is safe: an existing Pi is skipped, an
+  already-installed status extension is skipped, and
   `precreate.py` checks the `herdr-app` document first — if a space with
   the target name already exists and its terminal is live, it reports
   that and creates nothing. If that terminal has finished (or is gone),
