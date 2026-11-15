@@ -11,6 +11,7 @@ The first release of the aimachy fork (fleet-0.1.22, upstream 0.1.21 plus the fl
 - **Add a machine with an address, a user, a port and a password.** `hc machine add --host --user --port --password-stdin` needs no ssh config and no key on the other side: the host key is shown first and pinned only when you trust it, a key made for that one machine is planted for later connections, and the password itself is never stored or passed as an argument.
 - **This fork updates itself from its own GitHub Releases** (aimachy/herdr-core). The install scripts and the release manifest tool point there too, so a fork install never silently becomes an upstream one.
 - A one-shot installer for a fresh server (`fleet/install.sh` in this repo) installs the core and Pi and pre-creates a named space with Pi already running in it.
+- **A server that takes no password logins says so when you add it**, with the one command that enables password login for just your account, instead of a connection that simply fails.
 
 ## [0.1.21] - 2026-11-12
 
