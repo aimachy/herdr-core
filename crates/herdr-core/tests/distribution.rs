@@ -105,6 +105,14 @@ impl Releases {
             .replace(&format!("/core/{THIS}/"), &format!("/core/{version}/"));
         std::fs::write(dir.join("manifest.json"), &manifest).unwrap();
         std::fs::write(r.root.join("core/latest.json"), &manifest).unwrap();
+        // The GitHub Releases layout hc itself reads: the install script
+        // above still uses the paths just written, so serve both.
+        let latest_dir = r.root.join("latest/download");
+        std::fs::create_dir_all(&latest_dir).unwrap();
+        std::fs::write(latest_dir.join("core-latest.json"), &manifest).unwrap();
+        let version_dir = r.root.join(format!("download/v{version}"));
+        std::fs::create_dir_all(&version_dir).unwrap();
+        std::fs::write(version_dir.join("manifest.json"), &manifest).unwrap();
         r
     }
 }
@@ -588,7 +596,7 @@ fn install_script_downloads(s: &Session, url: &str, releases: &str, installed: b
     std::fs::read_to_string(log).unwrap().lines().last().unwrap().to_owned()
 }
 
-/// The download counter on releases.herdr.dev: plain release URLs say install
+/// The download counter on the release server: plain release URLs say install
 /// or update; a mirror's query (a signed URL) or fragment, or another host,
 /// is fetched exactly as the list gives it.
 #[test]
@@ -658,7 +666,7 @@ fn hc_update_to_a_version_takes_at_least_that_one() {
 fn hc_update_never_takes_a_release_of_another_generation() {
     let mut s = Session::new();
     let r = Releases::new(&s, NEWER, &[&here()]);
-    let latest = r.root.join("core/latest.json");
+    let latest = r.root.join("latest/download/core-latest.json");
     let breaking = std::fs::read_to_string(&latest).unwrap().replace("\"generation\": 1", "\"generation\": 2");
     std::fs::write(&latest, breaking).unwrap();
     let dir = s.root.join("bin");

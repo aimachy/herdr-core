@@ -1,7 +1,12 @@
-//! Released builds on releases.herdr.dev: the list (`core/latest.json`, or
-//! `core/<version>/manifest.json` for one version) and its checked
-//! downloads. curl, sha256sum/shasum (Windows: its own crypto) and tar do
-//! the work: no HTTP or crypto code in hc for something run this rarely.
+//! Released builds on the fork's GitHub Releases
+//! (`https://github.com/aimachy/herdr-core/releases`): the list and its
+//! checked downloads. Each release carries a `core-latest.json` asset, so
+//! the latest list is `{base}/latest/download/core-latest.json`; one
+//! version's list is the `manifest.json` asset under its tag, at
+//! `{base}/download/v<version>/manifest.json`. The target archives are
+//! wherever the list's absolute `url`s say. curl, sha256sum/shasum
+//! (Windows: its own crypto) and tar do the work: no HTTP or crypto code
+//! in hc for something run this rarely.
 
 use crate::rpc::RpcError;
 use serde::Deserialize;
@@ -24,13 +29,17 @@ pub struct Target {
 
 fn base() -> String {
     std::env::var("HERDR_RELEASES_URL")
-        .unwrap_or_else(|_| "https://releases.herdr.dev".into())
+        .unwrap_or_else(|_| "https://github.com/aimachy/herdr-core/releases".into())
         .trim_end_matches('/')
         .into()
 }
 
 fn unavailable(why: String) -> RpcError {
-    RpcError::new("unavailable", why, "check your connection; the releases are at releases.herdr.dev")
+    RpcError::new(
+        "unavailable",
+        why,
+        "check your connection; the releases are at https://github.com/aimachy/herdr-core/releases",
+    )
 }
 
 fn curl(url: &str, to: &Path) -> Result<(), RpcError> {
@@ -50,8 +59,8 @@ fn curl(url: &str, to: &Path) -> Result<(), RpcError> {
 /// The latest release's list, or one version's.
 pub fn manifest(version: Option<&str>, scratch: &Path) -> Result<Manifest, RpcError> {
     let url = match version {
-        Some(v) => format!("{}/core/{v}/manifest.json", base()),
-        None => format!("{}/core/latest.json", base()),
+        Some(v) => format!("{}/download/v{v}/manifest.json", base()),
+        None => format!("{}/latest/download/core-latest.json", base()),
     };
     let file = scratch.join("manifest.json");
     curl(&url, &file)?;
