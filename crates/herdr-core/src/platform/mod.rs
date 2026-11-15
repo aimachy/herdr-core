@@ -164,7 +164,7 @@ pub fn verify_release_bundle(path: &std::path::Path) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     if macos_bundle::source_is_bundle(path) {
         let local = std::env::var("HERDR_RELEASES_URL")
-            .is_ok_and(|url| url.trim_end_matches('/') != "https://releases.herdr.dev");
+            .is_ok_and(|url| url.trim_end_matches('/') != "https://github.com/aimachy/herdr-core/releases");
         macos_bundle::verify(path.parent().unwrap().parent().unwrap().parent().unwrap(), local)?;
     }
     Ok(())

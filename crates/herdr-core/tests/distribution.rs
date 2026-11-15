@@ -102,17 +102,23 @@ impl Releases {
         let manifest = String::from_utf8(out.stdout)
             .unwrap()
             .replace(&format!("\"version\": \"{THIS}\""), &format!("\"version\": \"{version}\""))
-            .replace(&format!("/core/{THIS}/"), &format!("/core/{version}/"));
+            .replace(&format!("/download/v{THIS}/"), &format!("/download/v{version}/"));
         std::fs::write(dir.join("manifest.json"), &manifest).unwrap();
         std::fs::write(r.root.join("core/latest.json"), &manifest).unwrap();
-        // The GitHub Releases layout hc itself reads: the install script
-        // above still uses the paths just written, so serve both.
+        // The GitHub Releases layout everything reads now, hc and the
+        // install script alike. The archives are served from the version's
+        // download dir, linked to the very files in `dir`: a test that
+        // damages one damages what gets served.
         let latest_dir = r.root.join("latest/download");
         std::fs::create_dir_all(&latest_dir).unwrap();
         std::fs::write(latest_dir.join("core-latest.json"), &manifest).unwrap();
         let version_dir = r.root.join(format!("download/v{version}"));
         std::fs::create_dir_all(&version_dir).unwrap();
         std::fs::write(version_dir.join("manifest.json"), &manifest).unwrap();
+        for t in targets {
+            let name = format!("herdr-core-{t}.tar.gz");
+            std::os::unix::fs::symlink(dir.join(&name), version_dir.join(&name)).unwrap();
+        }
         r
     }
 }
@@ -573,7 +579,7 @@ fn install_script_downloads(s: &Session, url: &str, releases: &str, installed: b
     std::fs::write(
         stub.join("curl"),
         format!(
-            "#!/bin/sh\nout=; url=; prev=\nfor a; do\n  if [ \"$prev\" = -o ]; then out=$a; else case $a in -*) ;; *) url=$a ;; esac; fi\n  prev=$a\ndone\necho \"$url\" >> {log}\ncase $url in */latest.json) cp {list} \"$out\"; exit 0 ;; esac\nexit 22\n",
+            "#!/bin/sh\nout=; url=; prev=\nfor a; do\n  if [ \"$prev\" = -o ]; then out=$a; else case $a in -*) ;; *) url=$a ;; esac; fi\n  prev=$a\ndone\necho \"$url\" >> {log}\ncase $url in */core-latest.json) cp {list} \"$out\"; exit 0 ;; esac\nexit 22\n",
             log = log.display(),
             list = list.display()
         ),

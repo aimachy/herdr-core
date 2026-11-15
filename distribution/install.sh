@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs herdr-core (hc), or updates it:
 #
-#   curl -fsSL https://releases.herdr.dev/core/install.sh | sh
+#   curl -fsSL https://github.com/aimachy/herdr-core/releases/latest/download/install.sh | sh
 #
 # Into ~/.local/bin/herdr-core, with `hc` beside it only if no `hc` exists
 # (some window managers ship one). An hc that is already there is swapped
@@ -10,7 +10,7 @@
 # HERDR_RELEASES_URL points elsewhere (tests).
 set -eu
 
-releases=${HERDR_RELEASES_URL:-https://releases.herdr.dev}
+releases=${HERDR_RELEASES_URL:-https://github.com/aimachy/herdr-core/releases}
 bin=${HC_INSTALL_DIR:-$HOME/.local/bin}
 
 say() { printf '%s\n' "$*"; }
@@ -39,8 +39,8 @@ sha256() {
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp" "$bin/herdr-core.staged"' EXIT
 
-manifest="$releases/core/latest.json"
-[ -n "${HC_VERSION:-}" ] && manifest="$releases/core/$HC_VERSION/manifest.json"
+manifest="$releases/latest/download/core-latest.json"
+[ -n "${HC_VERSION:-}" ] && manifest="$releases/download/v$HC_VERSION/manifest.json"
 curl -fsSL "$manifest" -o "$tmp/manifest.json" || fail "cannot reach $manifest"
 # Read without jq: the manifest is flat enough for sed once spaces are gone.
 flat=$(tr -d '\n ' < "$tmp/manifest.json")
