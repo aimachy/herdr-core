@@ -36,7 +36,12 @@ fn at_terminal() -> bool {
 
 /// How a listed machine is reached.
 fn reach_of(m: &Value) -> crate::machines::Reach<'_> {
-    crate::machines::Reach { target: m["target"].as_str().unwrap_or_default(), via: m["via"] == true }
+    crate::machines::Reach {
+        target: m["target"].as_str().unwrap_or_default(),
+        via: m["via"] == true,
+        host_key: m["host_key"].as_str(),
+        key_file: m["key_file"].as_str(),
+    }
 }
 
 pub(super) fn machine(
@@ -46,15 +51,37 @@ pub(super) fn machine(
 ) -> Result<Out, RpcError> {
     let s = |v: &Value| v.as_str().unwrap_or_default().to_string();
     Ok(match action {
-        MachineCmd::Add(p) => {
-            let target =
-                p.via.clone().or_else(|| p.target.clone().map(crate::machines::ssh_target)).unwrap_or_default();
-            let reach = crate::machines::Reach { target: &target, via: p.via.is_some() };
-            if at_terminal() {
+        MachineCmd::Add(mut p) => {
+            let target = match &p.host {
+                Some(host) => crate::machines::compose_target(host, p.user.as_deref(), p.port),
+                None => p.via.clone().or_else(|| p.target.clone().map(crate::machines::ssh_target)).unwrap_or_default(),
+            };
+            let reach =
+                crate::machines::Reach { target: &target, via: p.via.is_some(), host_key: None, key_file: None };
+            if p.password_stdin {
+                // The password arrives on stdin, never in the arguments; it
+                // rides to the core in this call's params and nowhere else.
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).map_err(|e| RpcError::internal(e.to_string()))?;
+                let password = line.trim_end_matches(['\n', '\r']).to_string();
+                if password.is_empty() {
+                    return Err(RpcError::new(
+                        "usage",
+                        "no password on stdin",
+                        "pipe one line: the machine's login password",
+                    ));
+                }
+                p.password = Some(password);
+            }
+            if p.password.is_none() && at_terminal() {
                 crate::machines::login(paths, reach)?;
             }
             let m = match call("machine.add", to(&p)) {
-                Err(e) if (p.install || at_terminal()) && matches!(e.kind.as_str(), "hc_missing" | "incompatible") => {
+                Err(e)
+                    if p.password.is_none()
+                        && (p.install || at_terminal())
+                        && matches!(e.kind.as_str(), "hc_missing" | "incompatible") =>
+                {
                     let what = if e.kind == "hc_missing" { "has no hc" } else { "has an hc too old to talk to" };
                     if !p.install {
                         eprint!("{target} {what}. Copy this hc ({}) there? [Y/n] ", env!("CARGO_PKG_VERSION"));

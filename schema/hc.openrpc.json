@@ -525,6 +525,14 @@
             "description": "What that core calls itself (its hostname).",
             "type": "string"
           },
+          "host_key": {
+            "default": null,
+            "description": "The pinned host key (SHA256 fingerprint), for a machine added with a\npassword: it is reached with the embedded ssh (machines_russh), and a\ndifferent key there is refused. Null for machines reached by the ssh\nprogram, and in records written before this field.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "description": "The other core's permanent id.",
             "type": "string"
@@ -534,6 +542,14 @@
             "description": "Last observed systemd logout protection; null for old or unsupported cores.",
             "type": [
               "boolean",
+              "null"
+            ]
+          },
+          "key_file": {
+            "default": null,
+            "description": "The planted login key's file name (in the state folder's `keys/`),\nfor a machine added with a password.",
+            "type": [
+              "string",
               "null"
             ]
           },
@@ -605,6 +621,14 @@
             "description": "What that core calls itself (its hostname).",
             "type": "string"
           },
+          "host_key": {
+            "default": null,
+            "description": "The pinned host key (SHA256 fingerprint), for a machine added with a\npassword: it is reached with the embedded ssh (machines_russh), and a\ndifferent key there is refused. Null for machines reached by the ssh\nprogram, and in records written before this field.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "description": "The other core's permanent id.",
             "type": "string"
@@ -614,6 +638,14 @@
             "description": "Last observed systemd logout protection; null for old or unsupported cores.",
             "type": [
               "boolean",
+              "null"
+            ]
+          },
+          "key_file": {
+            "default": null,
+            "description": "The planted login key's file name (in the state folder's `keys/`),\nfor a machine added with a password.",
+            "type": [
+              "string",
               "null"
             ]
           },
@@ -3753,6 +3785,18 @@
       "paramStructure": "by-name",
       "params": [
         {
+          "description": "The machine's host (an IP or a name), with --user and --port: the\nform's way of giving a target, instead of a target or ~/.ssh/config.",
+          "name": "host",
+          "required": false,
+          "schema": {
+            "description": "The machine's host (an IP or a name), with --user and --port: the\nform's way of giving a target, instead of a target or ~/.ssh/config.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        {
           "description": "What to call it here (default: the target's host).",
           "name": "name",
           "required": false,
@@ -3760,6 +3804,21 @@
             "description": "What to call it here (default: the target's host).",
             "type": [
               "string",
+              "null"
+            ]
+          }
+        },
+        {
+          "description": "The ssh port there (with --host; default 22).",
+          "name": "port",
+          "required": false,
+          "schema": {
+            "description": "The ssh port there (with --host; default 22).",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
               "null"
             ]
           }
@@ -3796,6 +3855,30 @@
             "default": false,
             "description": "Mark it short-lived (a sandbox for a task), so clients can show it apart\nfrom machines that stay. hc treats it like any other; remove it with\n`hc machine rm`.",
             "type": "boolean"
+          }
+        },
+        {
+          "description": "Pin this host key fingerprint (SHA256:…): the retry after a\n`host_key` error reported the key a machine presents, once a person\nhas checked it. The fingerprint is pinned in the machine's record.",
+          "name": "trust_host_key",
+          "required": false,
+          "schema": {
+            "description": "Pin this host key fingerprint (SHA256:…): the retry after a\n`host_key` error reported the key a machine presents, once a person\nhas checked it. The fingerprint is pinned in the machine's record.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        {
+          "description": "The user to log in as there (with --host).",
+          "name": "user",
+          "required": false,
+          "schema": {
+            "description": "The user to log in as there (with --host).",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         {

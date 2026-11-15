@@ -2,6 +2,15 @@
 
 `just notices` combines these texts with every registry package in `Cargo.lock`, including target-specific and build dependencies. It reads full LICENSE/COPYING/NOTICE files from Cargo's downloaded sources and fails if none exist. It needs Cargo, jq, and Unix tools. The result is embedded in `hc --licenses` and shipped in release archives.
 
+A few Cargo packages ship no license text in their .crate file. For
+those, `crates/<name>.txt` here is a checked-in copy and `scripts/notices`
+falls back to it. Currently (all pulled in by the russh dependency tree):
+`delegate.txt` (delegate 0.13.5, MIT text from kobzol/rust-delegate at
+v0.13.5) and the Apache-2.0 packages `pageant`, `russh`,
+`russh-cryptovec`, `russh-util` (standard Apache-2.0 text; their repos
+carry no license file at the repo root) plus `r-efi` (MIT OR Apache-2.0
+OR LGPL-2.1-or-later; the Apache-2.0 text is the elected option).
+
 Non-Cargo inputs are checked in so regeneration doesn't depend on a license server:
 
 - `ghostty.txt`: Ghostty's MIT license at submodule commit `1e5cdb865807abc990181efb8ebfa9122955cce2`.

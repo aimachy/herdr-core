@@ -634,12 +634,13 @@ fn free_name(core: &Core, st: &crate::runtime::State, name: &str) -> Result<(), 
 }
 
 async fn machine_add(core: Ctx<'_>, p: MachineAddParams) -> Result<crate::machines::Machine, RpcError> {
-    let (target, via) = match (p.target, p.via) {
-        (Some(target), None) => (crate::machines::ssh_target(target), false),
-        (None, Some(command)) => (command, true),
-        _ => return Err(RpcError::invalid_params("give either target or via")),
+    let (target, via) = match (p.target, p.via, p.host) {
+        (Some(target), None, _) => (crate::machines::ssh_target(target), false),
+        (None, Some(command), _) => (command, true),
+        (None, None, Some(host)) => (crate::machines::compose_target(&host, p.user.as_deref(), p.port), false),
+        _ => return Err(RpcError::invalid_params("give a target, a via command, or a host")),
     };
-    let to = crate::machines::Reach { target: &target, via };
+    let to = crate::machines::Reach { target: &target, via, host_key: None, key_file: None };
     crate::machines::check_target(to)?;
     if let Some(session) = &p.session {
         crate::addr::check_name(session)?;
@@ -654,6 +655,42 @@ async fn machine_add(core: Ctx<'_>, p: MachineAddParams) -> Result<crate::machin
             }),
     };
     name(&core.lock())?;
+    // A password add: log in with the embedded ssh, plant this core's key
+    // there, and let the hello below prove the key works. The password
+    // itself is never stored; the host key it was checked against is
+    // pinned in the record.
+    let mut pinned: Option<(String, String)> = None;
+    if let Some(password) = &p.password {
+        if via {
+            return Err(RpcError::invalid_params("a password goes with an ssh target, not --via"));
+        }
+        let name_now = name(&core.lock())?;
+        let session = crate::machines_russh::open(
+            &target,
+            crate::machines_russh::Auth::Password(password.clone()),
+            p.trust_host_key.as_deref(),
+        )
+        .await?;
+        let (key_file, line) = crate::machines::ensure_planted_key(&core.paths.state, &name_now)?;
+        let (status, _out, err) = session.exec(&crate::machines_russh::plant_line(&line)).await?;
+        if status != 0 {
+            let why = String::from_utf8_lossy(&err);
+            let why = why.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("no reason given");
+            return Err(RpcError::new(
+                "install_failed",
+                format!("planting the login key on {target} failed: {why}"),
+                "the password login worked; nothing else was changed there",
+            ));
+        }
+        pinned = Some((session.fingerprint.clone(), key_file));
+        drop(session);
+    }
+    let to = match &pinned {
+        Some((fingerprint, key_file)) => {
+            crate::machines::Reach { target: &target, via, host_key: Some(fingerprint), key_file: Some(key_file) }
+        }
+        None => to,
+    };
     let hello = crate::machines::hello(&core.paths, to, p.session.as_deref()).await?;
     let text = |k: &str| hello["core"][k].as_str().unwrap_or_default().to_string();
     let mut st = core.lock();
@@ -666,6 +703,8 @@ async fn machine_add(core: Ctx<'_>, p: MachineAddParams) -> Result<crate::machin
         id: text("id"),
         host: text("name"),
         version: hello["version"].as_str().unwrap_or_default().into(),
+        host_key: pinned.as_ref().map(|(fingerprint, _)| fingerprint.clone()),
+        key_file: pinned.as_ref().map(|(_, key_file)| key_file.clone()),
         keeps_running_after_logout: hello["keeps_running_after_logout"].as_bool(),
         logout_linger_user: hello["logout_linger_user"].as_str().map(String::from),
     };

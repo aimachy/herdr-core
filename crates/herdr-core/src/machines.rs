@@ -32,6 +32,16 @@ pub struct Machine {
     pub host: String,
     /// Its hc version when last seen.
     pub version: String,
+    /// The pinned host key (SHA256 fingerprint), for a machine added with a
+    /// password: it is reached with the embedded ssh (machines_russh), and a
+    /// different key there is refused. Null for machines reached by the ssh
+    /// program, and in records written before this field.
+    #[serde(default)]
+    pub host_key: Option<String>,
+    /// The planted login key's file name (in the state folder's `keys/`),
+    /// for a machine added with a password.
+    #[serde(default)]
+    pub key_file: Option<String>,
     /// Last observed systemd logout protection; null for old or unsupported cores.
     #[serde(default)]
     pub keeps_running_after_logout: Option<bool>,
@@ -42,15 +52,38 @@ pub struct Machine {
 
 impl Machine {
     pub fn reach(&self) -> Reach<'_> {
-        Reach { target: &self.target, via: self.via }
+        Reach {
+            target: &self.target,
+            via: self.via,
+            host_key: self.host_key.as_deref(),
+            key_file: self.key_file.as_deref(),
+        }
     }
 }
 
 /// How hc gets there: `ssh <target> <line>`, or `<target> <line>` (`via`).
+/// With a pinned host key, the embedded ssh (machines_russh) and the
+/// planted key get there instead of the ssh program.
 #[derive(Clone, Copy)]
 pub struct Reach<'a> {
     pub target: &'a str,
     pub via: bool,
+    /// A pinned host key fingerprint: the mark of an embedded-ssh machine.
+    pub host_key: Option<&'a str>,
+    /// The planted login key's file name, with `host_key`.
+    pub key_file: Option<&'a str>,
+}
+
+impl Reach<'_> {
+    /// Reached by the embedded ssh, not the ssh program.
+    pub fn embedded(&self) -> bool {
+        !self.via && self.host_key.is_some()
+    }
+}
+
+/// A plain ssh reach (the ssh program, no planted key).
+pub fn ssh_reach(target: &str) -> Reach<'_> {
+    Reach { target, via: false, host_key: None, key_file: None }
 }
 
 impl Reach<'_> {
@@ -162,6 +195,62 @@ pub fn check_target(to: Reach) -> Result<(), RpcError> {
     Ok(())
 }
 
+/// A host as the add form gives it (host, user, port), in the target form
+/// hc stores: `ssh://user@host:port` when a port is written (the form
+/// `ssh_target` would make of it), else `user@host`.
+pub fn compose_target(host: &str, user: Option<&str>, port: Option<u16>) -> String {
+    let user = user.filter(|u| !u.is_empty()).map(|u| format!("{u}@")).unwrap_or_default();
+    match port {
+        Some(port) => format!("ssh://{user}{host}:{port}"),
+        None => format!("{user}{host}"),
+    }
+}
+
+/// Where a machine's planted key lives: the state folder's `keys/`.
+fn key_path(state: &Path, name: &str) -> std::path::PathBuf {
+    state.join("keys").join(format!("{name}.key"))
+}
+
+/// A machine's planted login key, made on first use and kept (0600, in a
+/// 0700 folder): (its file name, its authorized_keys line). Reused as-is
+/// afterwards, so re-adding a machine plants nothing new.
+pub fn ensure_planted_key(state: &Path, name: &str) -> Result<(String, String), RpcError> {
+    let path = key_path(state, name);
+    let file_name = path.file_name().expect("key path has a file name").to_string_lossy().into_owned();
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let key = crate::machines_russh::load_key(&text)?;
+        return Ok((file_name, crate::machines_russh::public_line(&key)?));
+    }
+    let key = crate::machines_russh::new_key_pair()?;
+    let secret = crate::machines_russh::secret_text(&key)?;
+    let dir = path.parent().expect("key path has a folder");
+    std::fs::create_dir_all(dir).map_err(|e| RpcError::internal(e.to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+    crate::paths::write_atomic(&path, secret.as_bytes()).map_err(|e| RpcError::internal(e.to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok((file_name, crate::machines_russh::public_line(&key)?))
+}
+
+/// The planted key a dial authenticates with.
+fn planted_auth(state: &Path, file_name: &str) -> Result<crate::machines_russh::Auth, RpcError> {
+    let text = std::fs::read_to_string(state.join("keys").join(file_name)).map_err(|e| {
+        RpcError::new(
+            "needs_login",
+            format!("the planted login key is unreadable: {e}"),
+            "remove the machine and add it again with its password",
+        )
+    })?;
+    Ok(crate::machines_russh::Auth::Key(crate::machines_russh::load_key(&text)?))
+}
+
 /// One login per target, shared: a person logs in once in a terminal (codes,
 /// passwords), and the core's connections ride that login. Short, private path.
 #[cfg(unix)]
@@ -201,7 +290,8 @@ fn ssh(paths: &crate::paths::Paths, target: &str, extra: &[&str]) -> std::proces
 pub fn login(paths: &crate::paths::Paths, to: Reach) -> Result<(), RpcError> {
     check_target(to)?;
     let target = to.target;
-    if to.via || cfg!(windows) {
+    if to.via || cfg!(windows) || to.embedded() {
+        // An embedded machine's planted key is its login: nothing to type.
         return Ok(());
     }
     paths.create_dirs().map_err(|e| RpcError::internal(e.to_string()))?;
@@ -239,17 +329,12 @@ fn is_windows(target: &str) -> bool {
 /// install. `.\` reads the same in cmd and PowerShell.
 const WINDOWS_HC: &str = r".\AppData\Local\Programs\herdr-core\herdr-core.exe";
 
-/// The pipe to the core there: `herdr-core connect`, found on PATH, else in
-/// ~/.local/bin. On Windows, whose shell may be cmd or PowerShell, one line
-/// both read alike; the installer put hc on PATH. Never prompts: a login a
-/// person must type fails fast.
-fn pipe(
-    paths: &crate::paths::Paths,
-    to: Reach,
-    session: Option<&str>,
-    windows: bool,
-) -> Result<tokio::process::Command, RpcError> {
-    let remote = if windows {
+/// The remote line that starts `herdr-core connect` there: found on PATH,
+/// else in ~/.local/bin. On Windows, whose shell may be cmd or PowerShell,
+/// one line both read alike; the installer put hc on PATH. The ssh pipe
+/// and the embedded pipe (machines_russh) run the same line.
+fn connect_line(session: Option<&str>, windows: bool) -> String {
+    if windows {
         let session = session.map(|s| format!(" --session {s}")).unwrap_or_default();
         format!(
             "cmd /d /c \"if exist {WINDOWS_HC} ({WINDOWS_HC} connect{session}) else (echo {NOT_HERE} 1>&2 & exit /b 127)\""
@@ -259,7 +344,18 @@ fn pipe(
         format!(
             "sh -c 'p=$(command -v herdr-core) || p=$HOME/.local/bin/herdr-core; [ -x \"$p\" ] || {{ echo \"{NOT_HERE}\" >&2; exit 127; }}; {session}exec \"$p\" connect'"
         )
-    };
+    }
+}
+
+/// The pipe to the core there, over the ssh program. Never prompts: a login
+/// a person must type fails fast.
+fn pipe(
+    paths: &crate::paths::Paths,
+    to: Reach,
+    session: Option<&str>,
+    windows: bool,
+) -> Result<tokio::process::Command, RpcError> {
+    let remote = connect_line(session, windows);
     let options = ["BatchMode=yes", "ConnectTimeout=10", "ServerAliveInterval=15", "ServerAliveCountMax=4"];
     let mut cmd = tokio::process::Command::from(to.command(paths, &options, &remote)?);
     cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
@@ -287,14 +383,40 @@ fn wants_login(err: &str) -> bool {
             && ["publickey", "keyboard-interactive", "password"].iter().any(|k| err.contains(k))
 }
 
+/// What keeps a dialed line alive: the ssh child, or the embedded
+/// connection's pump task.
+pub(crate) enum LineGuard {
+    Child(tokio::process::Child),
+    Embedded(tokio::task::JoinHandle<()>),
+}
+
 /// An open pipe to the core there, past its hello.
 pub struct Dialed {
-    pub child: tokio::process::Child,
-    pub stdin: tokio::process::ChildStdin,
+    pub stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
     /// Framed from here on (when dialed framed); may hold bytes already read.
-    pub stdout: BufReader<tokio::process::ChildStdout>,
-    pub stderr: tokio::process::ChildStderr,
+    pub stdout: BufReader<Box<dyn tokio::io::AsyncRead + Send + Unpin>>,
+    pub stderr: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
     pub hello: Value,
+    pub(crate) guard: LineGuard,
+}
+
+impl LineGuard {
+    /// Hangs up now: the ssh child is killed, the embedded pump aborted.
+    pub(crate) fn kill(&mut self) {
+        match self {
+            LineGuard::Child(child) => {
+                let _ = child.start_kill();
+            }
+            LineGuard::Embedded(task) => task.abort(),
+        }
+    }
+}
+
+impl Dialed {
+    /// Hangs up now (see LineGuard::kill).
+    pub fn kill(&mut self) {
+        self.guard.kill();
+    }
 }
 
 /// Dials, says hello and hangs up: the other core's hello, or why not.
@@ -309,6 +431,9 @@ pub async fn dial(
     session: Option<&str>,
     hello: Value,
 ) -> Result<Dialed, RpcError> {
+    if to.embedded() {
+        return dial_embedded(paths, to, session, hello).await;
+    }
     let mut probe_windows = false;
     match dial_once(paths, to, session, hello.clone(), is_windows(to.target), &mut probe_windows).await {
         Err(e) if probe_windows => match dial_once(paths, to, session, hello, true, &mut probe_windows).await {
@@ -332,26 +457,8 @@ async fn dial_once(
         pipe(paths, to, session, windows)?.spawn().map_err(|e| unreachable(to, &format!("cannot run it: {e}")))?;
     let (mut stdin, stdout, mut stderr) =
         (child.stdin.take().unwrap(), child.stdout.take().unwrap(), child.stderr.take().unwrap());
-    let mut params = json!({"generation": crate::api::GENERATION});
-    params.as_object_mut().unwrap().extend(hello.as_object().cloned().unwrap_or_default());
-    let req = json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": params});
-    let _ = stdin.write_all(format!("{req}\n").as_bytes()).await;
-    // A login may print a banner first: the reply is the first line that is one.
-    let mut lines = BufReader::new(stdout);
-    let reply = async {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match lines.read_line(&mut line).await {
-                Ok(1..) => match serde_json::from_str::<Value>(&line) {
-                    Ok(reply) if reply["id"] == 1 => return Some(reply),
-                    _ => continue,
-                },
-                _ => return None,
-            }
-        }
-    };
-    let reply = tokio::time::timeout(Duration::from_secs(20), reply).await;
+    let mut lines = BufReader::new(Box::new(stdout) as Box<dyn tokio::io::AsyncRead + Send + Unpin>);
+    let reply = tokio::time::timeout(Duration::from_secs(20), read_hello(&mut stdin, &mut lines, hello)).await;
     let reply = match reply {
         Err(_) => return Err(unreachable(to, "no answer within 20 s")),
         Ok(Some(reply)) => reply,
@@ -404,6 +511,44 @@ async fn dial_once(
     if windows && !is_windows(target) {
         WINDOWS.lock().unwrap_or_else(|p| p.into_inner()).push(target.to_string());
     }
+    let hello = check_hello(to, reply)?;
+    Ok(Dialed {
+        stdin: Box::new(stdin),
+        stdout: lines,
+        stderr: Box::new(stderr),
+        hello,
+        guard: LineGuard::Child(child),
+    })
+}
+
+/// Writes the hello request and reads its reply: the first line that is a
+/// JSON reply to it (a login may print a banner first). None: the pipe
+/// closed before any reply.
+async fn read_hello(
+    stdin: &mut (impl tokio::io::AsyncWrite + Unpin),
+    lines: &mut BufReader<Box<dyn tokio::io::AsyncRead + Send + Unpin>>,
+    hello: Value,
+) -> Option<Value> {
+    let mut params = json!({"generation": crate::api::GENERATION});
+    params.as_object_mut().unwrap().extend(hello.as_object().cloned().unwrap_or_default());
+    let req = json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": params});
+    let _ = stdin.write_all(format!("{req}\n").as_bytes()).await;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match lines.read_line(&mut line).await {
+            Ok(1..) => match serde_json::from_str::<Value>(&line) {
+                Ok(reply) if reply["id"] == 1 => return Some(reply),
+                _ => continue,
+            },
+            _ => return None,
+        }
+    }
+}
+
+/// A hello reply, judged: the other core's hello, or why it cannot serve.
+fn check_hello(to: Reach, reply: Value) -> Result<Value, RpcError> {
+    let target = to.target;
     match reply.get("error") {
         Some(e) if e["data"]["kind"] == "unsupported_generation" => Err(RpcError::new(
             "incompatible",
@@ -411,8 +556,63 @@ async fn dial_once(
             format!("in a terminal, `{}` offers to update it", to.add()),
         )),
         Some(e) => Err(RpcError::from_json(e)),
-        None => Ok(Dialed { child, stdin, stdout: lines, stderr, hello: reply["result"].clone() }),
+        None => Ok(reply["result"].clone()),
     }
+}
+
+/// Dials over the embedded ssh (machines_russh), with the planted key: the
+/// same hello over the same connect line, errors classified the same way
+/// from what the line printed and how it ended.
+async fn dial_embedded(
+    paths: &crate::paths::Paths,
+    to: Reach<'_>,
+    session: Option<&str>,
+    hello: Value,
+) -> Result<Dialed, RpcError> {
+    let target = to.target;
+    let Some(key_file) = to.key_file else {
+        return Err(RpcError::new(
+            "needs_login",
+            format!("{target} was added with a password but has no planted key"),
+            "remove the machine and add it again with its password",
+        ));
+    };
+    let auth = planted_auth(&paths.state, key_file)?;
+    let session_ssh = crate::machines_russh::open(target, auth, to.host_key).await?;
+    let mut pipe = session_ssh.pipe(&connect_line(session, false)).await?;
+    let mut lines = BufReader::new(pipe.stdout);
+    let reply = tokio::time::timeout(Duration::from_secs(20), read_hello(&mut pipe.stdin, &mut lines, hello)).await;
+    let reply = match reply {
+        Err(_) => return Err(unreachable(to, "no answer within 20 s")),
+        Ok(Some(reply)) => reply,
+        Ok(None) => {
+            // The pump may not have recorded the ending yet; give it a moment.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let err = {
+                let seen = pipe.stderr_seen.lock().unwrap_or_else(|p| p.into_inner());
+                String::from_utf8_lossy(&seen).into_owned()
+            };
+            let status = *pipe.exit.lock().unwrap_or_else(|p| p.into_inner());
+            if status == Some(127) || err.contains(NOT_HERE) {
+                return Err(RpcError::new(
+                    "hc_missing",
+                    format!("hc is not installed on {target}"),
+                    "install hc there with the fleet install script, then add the machine again",
+                ));
+            }
+            if wants_login(&err) {
+                return Err(RpcError::new(
+                    "needs_login",
+                    format!("{target} wants a login typed by a person (a password or a code)"),
+                    "remove the machine and add it again with its password",
+                ));
+            }
+            let why = err.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("the connection closed");
+            return Err(unreachable(to, why.trim()));
+        }
+    };
+    let hello = check_hello(to, reply)?;
+    Ok(Dialed { stdin: pipe.stdin, stdout: lines, stderr: pipe.stderr, hello, guard: LineGuard::Embedded(pipe.task) })
 }
 
 /// `uname -sm` as this binary names platforms: `linux x86_64`, `macos aarch64`.
@@ -475,6 +675,17 @@ fn run_raw(
 pub fn install(paths: &crate::paths::Paths, to: Reach, session: Option<&str>) -> Result<String, RpcError> {
     check_target(to)?;
     let target = to.target;
+    if to.embedded() {
+        // The copy goes over the ssh program, which has no way into a
+        // password-added machine; its hc is installed on the machine itself.
+        return Err(RpcError::new(
+            "install_failed",
+            format!(
+                "{target} was added with a password: its hc is installed by the fleet install script, run on {target}"
+            ),
+            "nothing was changed there",
+        ));
+    }
     if let Some(s) = session {
         check_name(s)?;
     }
@@ -603,7 +814,7 @@ fn install_windows(paths: &crate::paths::Paths, target: &str, session: Option<&s
         .args(["-o", "ControlMaster=no"]);
     scp.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]);
     scp.arg(scratch.0.join("hc-install.zip")).arg(&script).arg(format!("{target}:"));
-    let to = Reach { target, via: false };
+    let to = ssh_reach(target);
     let out = scp.output().map_err(|e| unreachable(to, &format!("cannot run scp: {e}")))?;
     if !out.status.success() {
         return Err(RpcError::new(
@@ -642,9 +853,11 @@ mod tests {
         assert_eq!(default_name("[::1]"), None);
         assert_eq!(default_name(&format!("{}-extra.example.com", "a".repeat(31))), Some("a".repeat(31)));
         assert_eq!(super::default_name("rohan", |name| name == "rohan"), Some("rohan-2".into()));
-        let ssh = |target| Reach { target, via: false };
+        let ssh = |target| ssh_reach(target);
         assert!(check_target(ssh("-oProxyCommand=x")).is_err() && check_target(ssh("a b")).is_err());
-        assert!(check_target(Reach { target: "fly ssh console -C", via: true }).is_ok());
+        assert!(
+            check_target(Reach { target: "fly ssh console -C", via: true, host_key: None, key_file: None }).is_ok()
+        );
         assert_eq!(platform("Darwin arm64"), "macos aarch64");
         assert_eq!(platform("Linux x86_64"), "linux x86_64");
         assert_eq!(platform("MINGW64_NT-10.0 x86_64"), "windows x86_64");
@@ -665,9 +878,17 @@ mod tests {
     }
 
     #[test]
+    fn a_composed_target_reads_like_an_ssh_target() {
+        assert_eq!(compose_target("10.0.0.7", Some("root"), Some(2222)), "ssh://root@10.0.0.7:2222");
+        assert_eq!(compose_target("vps.example", Some("can"), None), "can@vps.example");
+        assert_eq!(compose_target("vps.example", None, None), "vps.example");
+        assert_eq!(compose_target("vps.example", Some(""), Some(22)), "ssh://vps.example:22");
+    }
+
+    #[test]
     fn a_windows_box_gets_one_line_cmd_and_powershell_read_alike() {
         let paths = crate::paths::Paths::from_env().unwrap();
-        let cmd = pipe(&paths, Reach { target: "winbox", via: false }, Some("s1"), true).unwrap();
+        let cmd = pipe(&paths, ssh_reach("winbox"), Some("s1"), true).unwrap();
         let line = cmd.as_std().get_args().last().unwrap().to_string_lossy().into_owned();
         assert_eq!(
             line,

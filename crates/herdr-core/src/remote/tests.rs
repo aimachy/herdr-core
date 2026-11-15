@@ -29,11 +29,13 @@ async fn removing_or_replacing_a_machine_drops_its_status_poll() {
             .spawn()
             .unwrap();
         let dialed = crate::machines::Dialed {
-            stdin: child.stdin.take().unwrap(),
-            stdout: tokio::io::BufReader::new(child.stdout.take().unwrap()),
-            stderr: child.stderr.take().unwrap(),
-            child,
+            stdin: Box::new(child.stdin.take().unwrap()),
+            stdout: tokio::io::BufReader::new(
+                Box::new(child.stdout.take().unwrap()) as Box<dyn tokio::io::AsyncRead + Send + Unpin>
+            ),
+            stderr: Box::new(child.stderr.take().unwrap()),
             hello: json!({}),
+            guard: crate::machines::LineGuard::Child(child),
         };
         let owner = core.clone();
         let task = tokio::spawn(async move { hold(&owner, &machine, dialed).await });
@@ -134,6 +136,8 @@ async fn automatic_input_survives_relays_but_not_a_capability_downgrade() {
             id: "remote".into(),
             host: "away".into(),
             version: "test".into(),
+            host_key: None,
+            key_file: None,
             keeps_running_after_logout: None,
             logout_linger_user: None,
         };
@@ -247,6 +251,8 @@ async fn failed_reattach_drains_pending_data_before_close() {
         id: "remote".into(),
         host: "away".into(),
         version: "test".into(),
+        host_key: None,
+        key_file: None,
         keeps_running_after_logout: None,
         logout_linger_user: None,
     };
@@ -319,6 +325,8 @@ fn remote_misses_and_renames_keep_subscribers_on_the_current_machine() {
         id: "remote".into(),
         host: "rohan".into(),
         version: "test".into(),
+        host_key: None,
+        key_file: None,
         keeps_running_after_logout: None,
         logout_linger_user: None,
     };

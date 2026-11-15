@@ -15,6 +15,7 @@ mod kept;
 pub mod keys;
 pub mod locale;
 pub mod machines;
+pub mod machines_russh;
 pub mod notes;
 pub mod paths;
 pub mod picker;

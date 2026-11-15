@@ -350,13 +350,18 @@ Arguments:
   [TARGET]  How ssh reaches it: `vps`, `can@10.0.0.7`, `can@10.0.0.7:2222`, a Host from ~/.ssh/config
 
 Options:
-      --json               JSON output even in a terminal
-      --via <COMMAND>      Reach it with this command instead of ssh: it is given a shell line to run there as its last argument, like ssh (`ssh -p 2222 -i key user@ip`, `fly ssh console -a app --pty=false -C`). It must pass bytes both ways untouched and ask nothing. Needs --name. On Windows, a program and its arguments (CommandLineToArgvW split, no shell), with the remote line appended as one argument, no console window; Unix stays an sh line. WSL: --via 'wsl.exe -d Ubuntu -e sh -c' --name wsl
-      --temp               Mark it short-lived (a sandbox for a task), so clients can show it apart from machines that stay. hc treats it like any other; remove it with `hc machine rm`
-      --install            Copy this hc there when it has none or one too old, without asking (for scripts; in a terminal you are asked)
-      --name <NAME>        What to call it here (default: the target's host)
-      --session <SESSION>  The hc session on that machine (default: its default)
-  -h, --help               Print help
+      --host <HOST>                The machine's host (an IP or a name), with --user and --port: the form's way of giving a target, instead of a target or ~/.ssh/config
+      --json                       JSON output even in a terminal
+      --user <USER>                The user to log in as there (with --host)
+      --port <PORT>                The ssh port there (with --host; default 22)
+      --password-stdin             Read the login password from stdin (one line) and log in with the embedded ssh: the password is never an argument, never saved; a key is planted there and used from then on. Filled in by the CLI; over RPC the password travels in `password` instead
+      --trust-host-key <SHA256:…>  Pin this host key fingerprint (SHA256:…): the retry after a `host_key` error reported the key a machine presents, once a person has checked it. The fingerprint is pinned in the machine's record
+      --via <COMMAND>              Reach it with this command instead of ssh: it is given a shell line to run there as its last argument, like ssh (`ssh -p 2222 -i key user@ip`, `fly ssh console -a app --pty=false -C`). It must pass bytes both ways untouched and ask nothing. Needs --name. On Windows, a program and its arguments (CommandLineToArgvW split, no shell), with the remote line appended as one argument, no console window; Unix stays an sh line. WSL: --via 'wsl.exe -d Ubuntu -e sh -c' --name wsl
+      --temp                       Mark it short-lived (a sandbox for a task), so clients can show it apart from machines that stay. hc treats it like any other; remove it with `hc machine rm`
+      --install                    Copy this hc there when it has none or one too old, without asking (for scripts; in a terminal you are asked)
+      --name <NAME>                What to call it here (default: the target's host)
+      --session <SESSION>          The hc session on that machine (default: its default)
+  -h, --help                       Print help
 ```
 
 ## hc machine login

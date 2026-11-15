@@ -754,9 +754,43 @@ pub struct FileResult {
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct MachineAddParams {
     /// How ssh reaches it: `vps`, `can@10.0.0.7`, `can@10.0.0.7:2222`, a Host from ~/.ssh/config.
-    #[arg(required_unless_present = "via", conflicts_with = "via")]
+    #[arg(required_unless_present_any = ["via", "host"], conflicts_with = "via")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// The machine's host (an IP or a name), with --user and --port: the
+    /// form's way of giving a target, instead of a target or ~/.ssh/config.
+    #[arg(long, conflicts_with_all = ["target", "via"])]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// The user to log in as there (with --host).
+    #[arg(long, requires = "host")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// The ssh port there (with --host; default 22).
+    #[arg(long, requires = "host")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// Read the login password from stdin (one line) and log in with the
+    /// embedded ssh: the password is never an argument, never saved; a key
+    /// is planted there and used from then on. Filled in by the CLI; over
+    /// RPC the password travels in `password` instead.
+    #[arg(long = "password-stdin")]
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub password_stdin: bool,
+    /// The login password, carried from the CLI (which read it from stdin)
+    /// to the core over their local socket only. Never an argument, never
+    /// saved anywhere.
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub password: Option<String>,
+    /// Pin this host key fingerprint (SHA256:…): the retry after a
+    /// `host_key` error reported the key a machine presents, once a person
+    /// has checked it. The fingerprint is pinned in the machine's record.
+    #[arg(long = "trust-host-key", value_name = "SHA256:…")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_host_key: Option<String>,
     /// Reach it with this command instead of ssh: it is given a shell line to
     /// run there as its last argument, like ssh (`ssh -p 2222 -i key user@ip`,
     /// `fly ssh console -a app --pty=false -C`). It must pass bytes both ways
