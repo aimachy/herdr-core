@@ -2,8 +2,15 @@
 
 ## Unreleased
 
+## [0.1.21.1] - 2026-11-15
+
+The first release of the aimachy fork (fleet-0.1.21.1), from the fleet branch.
+
 ### New
 - **A subscription can name the documents it wants, instead of receiving every one.** `hc events --doc <name>` (repeatable; a name ending in `*` is a prefix) delivers only those document changes, so a program that watches a single document no longer has every document change from every terminal delivered to it, and no longer has to filter them out itself. A subscriber that names none behaves exactly as before and still hears them all; a subscriber that selects a terminal and also names documents hears both.
+- **Add a machine with an address, a user, a port and a password.** `hc machine add --host --user --port --password-stdin` needs no ssh config and no key on the other side: the host key is shown first and pinned only when you trust it, a key made for that one machine is planted for later connections, and the password itself is never stored or passed as an argument.
+- **This fork updates itself from its own GitHub Releases** (aimachy/herdr-core). The install scripts and the release manifest tool point there too, so a fork install never silently becomes an upstream one.
+- A one-shot installer for a fresh server (`fleet/install.sh` in this repo) installs the core and Pi and pre-creates a named space with Pi already running in it.
 
 ## [0.1.21] - 2026-11-12
 
