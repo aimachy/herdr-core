@@ -2,8 +2,12 @@
 """Pre-create a herdr-app space that adopts a fresh Pi terminal.
 
 Sequence (verified by Spike B2; do not reorder the core steps):
-  0. doc.get pre-check: if a space with the target name already exists,
-     report and exit 0 without creating anything (idempotent re-runs).
+  0. doc.get pre-check: if a space with the target name already exists
+     and the terminal it references is still live, report and exit 0
+     without creating anything (idempotent re-runs). If that terminal
+     is finished or gone, repair the space in place instead: create a
+     fresh terminal, repoint the space's tab at it, and label it --
+     same order and rollback discipline as a fresh creation.
   1. `hc run --bg` a terminal running the Pi command, with NO herdr.*
      labels, and learn its address.
   2. doc.get again (fresh CAS version) and re-check the name.
@@ -129,6 +133,131 @@ def space_named(value, name):
     return None
 
 
+def _node_terminal(node):
+    """The first terminal address referenced anywhere in a layout tree."""
+    if not isinstance(node, dict):
+        return None
+    content = node.get("content")
+    if isinstance(content, dict) and isinstance(content.get("terminal"), str):
+        return content["terminal"]
+    for child in node.get("children") or []:
+        addr = _node_terminal(child)
+        if addr:
+            return addr
+    return None
+
+
+def find_reference(space):
+    """(tab id, terminal address) of the first terminal a space references."""
+    for tab in space.get("tabs") or []:
+        addr = _node_terminal(tab.get("root"))
+        if addr:
+            return tab.get("id"), addr
+    return None, None
+
+
+def replace_terminal(node, old, new):
+    """Rewrite every reference to OLD in a layout tree; True if any hit."""
+    hit = False
+    if isinstance(node, dict):
+        content = node.get("content")
+        if isinstance(content, dict) and content.get("terminal") == old:
+            content["terminal"] = new
+            hit = True
+        for child in node.get("children") or []:
+            hit = replace_terminal(child, old, new) or hit
+    return hit
+
+
+def terminal_state(hc, address):
+    """'live', 'finished', 'gone' (no such terminal), or None (unreadable)."""
+    proc = run_hc(hc, ["get", address], check=False)
+    if proc.returncode != 0:
+        return "gone"
+    try:
+        data = json.loads(proc.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if isinstance(data, dict) and isinstance(data.get("state"), str):
+        return data["state"]
+    return None
+
+
+def repair_space(rpc, hc, args, space, old_ref):
+    """Repoint an existing space whose terminal finished (or vanished)
+    at a fresh terminal. Mirrors the creation path's discipline: bare
+    terminal first, one CAS doc.set, labels last; any failure kills
+    the new terminal and restores the document as it was."""
+    sp = space.get("id")
+    terminal = None
+    backup = None
+    written = False
+    try:
+        out = run_hc(hc, ["run", "--bg", "--json", "--name", args.terminal_name,
+                          "--no-parent", "--no-notify", "--", args.pi_cmd])
+        terminal = terminal_address(out.stdout)
+        print("precreate: created terminal %s running %r" % (terminal, args.pi_cmd))
+
+        value, version = rpc.get_doc()
+        target = None
+        for cand in value.get("spaces", []):
+            if cand.get("id") == sp:
+                target = cand
+                break
+        if target is None:
+            raise RuntimeError("space %s disappeared meanwhile; aborting repair" % sp)
+        backup = json.loads(json.dumps(value))
+        tab_id, _ = find_reference(target)
+        if old_ref is None or not replace_terminal(target, old_ref, terminal):
+            # Nothing referenced the old terminal (or nothing at all):
+            # point the space's first tab at the new terminal directly.
+            tabs = target.get("tabs") or []
+            if not tabs:
+                tabs.append({"id": "tb" + secrets.token_hex(16), "name": ""})
+                target["tabs"] = tabs
+            tab = tabs[0]
+            if not tab.get("id"):
+                tab["id"] = "tb" + secrets.token_hex(16)
+            tab_id = tab["id"]
+            tab["root"] = {
+                "children": [{"content": {"terminal": terminal},
+                              "id": "p" + secrets.token_hex(16), "type": "block"}],
+                "id": tab_id,
+                "type": "row",
+            }
+        rpc.call("doc.set", {"name": DOC_NAME, "version": version, "value": value})
+        written = True
+        print("precreate: repointed space %s at terminal %s" % (sp, terminal))
+
+        run_hc(hc, ["label", terminal,
+                    "herdr.space=" + sp, "herdr.tab=" + str(tab_id), "herdr.seen=0"])
+        print("precreate: labelled %s herdr.space=%s herdr.tab=%s herdr.seen=0"
+              % (terminal, sp, tab_id))
+        print("precreate: repaired: space %r (%s), terminal %s"
+              % (args.space_name, sp, terminal))
+        return 0
+    except Exception as exc:
+        print("precreate: error: %s" % exc, file=sys.stderr)
+        if terminal:
+            run_hc(hc, ["kill", terminal], check=False)
+            run_hc(hc, ["rm", terminal], check=False)
+        if written and backup is not None:
+            try:
+                for _attempt in range(3):
+                    _value, version = rpc.get_doc()
+                    try:
+                        rpc.call("doc.set", {"name": DOC_NAME,
+                                             "version": version, "value": backup})
+                        print("precreate: restored the space document", file=sys.stderr)
+                        break
+                    except RuntimeError:
+                        continue  # CAS conflict: re-read and retry
+            except Exception as rb_exc:
+                print("precreate: warning: document restore failed: %s" % rb_exc,
+                      file=sys.stderr)
+        return 1
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--hc", default=None, help="path to hc/herdr-core binary")
@@ -153,9 +282,20 @@ def main():
         value, _version = rpc.get_doc()
         existing = space_named(value, args.space_name)
         if existing:
-            print("precreate: space %r already exists (id %s); nothing to do"
-                  % (args.space_name, existing.get("id")))
-            return 0
+            _tab, ref = find_reference(existing)
+            state = terminal_state(hc, ref) if ref else "gone"
+            if state == "live":
+                print("precreate: space %r already exists (id %s); nothing to do"
+                      % (args.space_name, existing.get("id")))
+                return 0
+            if state is None:
+                print("precreate: space %r already exists (id %s), but the state of"
+                      " its terminal %s is unreadable; leaving it alone"
+                      % (args.space_name, existing.get("id"), ref))
+                return 0
+            print("precreate: space %r exists but its terminal %s is %s; repairing"
+                  % (args.space_name, ref, state))
+            return repair_space(rpc, hc, args, existing, ref)
 
         # Step 1: bare terminal, no herdr.* labels yet.
         out = run_hc(hc, ["run", "--bg", "--json", "--name", args.terminal_name,

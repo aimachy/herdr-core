@@ -14,6 +14,7 @@ use crate::rpc::RpcError;
 use russh::client::{AuthResult, Config, Handle, Handler};
 use russh::keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{Channel, ChannelMsg};
+use russh::{MethodKind, MethodSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -100,6 +101,40 @@ fn host_key_error(target: &Target, fingerprint: &str, algo: &str, pinned: bool) 
     }
 }
 
+/// Whether the server will take a password at all: it offers the password
+/// method, or keyboard-interactive (which usually asks for the password
+/// through PAM). A failure offering neither means password logins are
+/// switched off there — a different problem from a wrong password, and the
+/// caller hears about it differently.
+fn password_login_offered(methods: &MethodSet) -> bool {
+    methods.contains(&MethodKind::Password) || methods.contains(&MethodKind::KeyboardInteractive)
+}
+
+/// The one command that turns password login on for just `user` there: a
+/// Match block in sshd_config.d (picked up by the sshd_config Include most
+/// distros ship), then a reload — the service is `ssh` on Debian/Ubuntu,
+/// `sshd` on RHEL-style systems, so try both. Run once, with sudo, on the
+/// server itself.
+pub fn enable_password_command(user: &str) -> String {
+    format!(
+        "printf 'Match User {user}\\n    PasswordAuthentication yes\\n' | \
+         sudo tee /etc/ssh/sshd_config.d/99-fleet-{user}.conf >/dev/null && \
+         (sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd)"
+    )
+}
+
+fn password_auth_disabled_error(target: &Target, user: &str) -> RpcError {
+    RpcError::new(
+        "password_auth_disabled",
+        format!(
+            "{} does not accept password logins for {user}: password authentication is turned off \
+             on that server, so the password was never checked — this is not a wrong password",
+            target.host
+        ),
+        format!("run this once on {} (it needs sudo), then add again:\n{}", target.host, enable_password_command(user)),
+    )
+}
+
 /// How a session authenticates. A password is never stored; it plants a key
 /// (see `new_key`) and the key is used from then on.
 pub enum Auth {
@@ -147,8 +182,11 @@ pub async fn open(target: &str, auth: Auth, expected: Option<&str>) -> Result<Se
     };
     match result {
         Ok(AuthResult::Success) => {}
-        Ok(AuthResult::Failure { .. }) => {
+        Ok(AuthResult::Failure { remaining_methods, .. }) => {
             return Err(match &auth {
+                Auth::Password(_) if !password_login_offered(&remaining_methods) => {
+                    password_auth_disabled_error(&t, &user)
+                }
                 Auth::Password(_) => RpcError::new(
                     "auth_failed",
                     format!("{} refused that password for {user}", t.host),
@@ -373,6 +411,38 @@ mod tests {
         // A non-numeric port is part of the host name to ssh; here it is a bad target.
         assert_eq!(t("rohan:22x").host, "rohan:22x");
         assert!(parse_target("").is_err() && parse_target("can@").is_err() && parse_target("[::1").is_err());
+    }
+
+    #[test]
+    fn password_login_is_offered_only_when_the_server_takes_passwords() {
+        let offered = |kinds: &[MethodKind]| password_login_offered(&MethodSet::from(kinds));
+        assert!(offered(&[MethodKind::Password]));
+        assert!(offered(&[MethodKind::KeyboardInteractive]));
+        assert!(offered(&[MethodKind::PublicKey, MethodKind::Password]));
+        assert!(!offered(&[MethodKind::PublicKey]));
+        assert!(!offered(&[]));
+    }
+
+    #[test]
+    fn the_enable_password_command_names_the_user_and_both_services() {
+        let cmd = enable_password_command("can");
+        assert!(cmd.contains("Match User can"), "{cmd}");
+        assert!(cmd.contains("PasswordAuthentication yes"), "{cmd}");
+        assert!(cmd.contains("/etc/ssh/sshd_config.d/99-fleet-can.conf"), "{cmd}");
+        assert!(cmd.contains("systemctl reload ssh"), "{cmd}");
+        assert!(cmd.contains("systemctl reload sshd"), "{cmd}");
+        assert!(!cmd.contains('\n'), "one line, copyable whole: {cmd}");
+    }
+
+    #[test]
+    fn a_server_without_password_login_gets_its_own_error() {
+        let t = parse_target("can@rohan").unwrap();
+        let e = password_auth_disabled_error(&t, "can");
+        assert_eq!(e.kind, "password_auth_disabled");
+        assert!(e.message.contains("rohan") && e.message.contains("can"), "{}", e.message);
+        // The command rides the hint, alone on its last line, so a person
+        // (or the app) can lift it out whole.
+        assert_eq!(e.hint.lines().last(), Some(enable_password_command("can").as_str()), "{}", e.hint);
     }
 
     #[test]

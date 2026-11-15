@@ -78,11 +78,39 @@ and the step is skipped. Otherwise Pi is installed with
 `npm install -g <package>`; with no `npm` on `PATH` the script stops with
 a clear error (install Node.js first, or use `--skip-pi`).
 
+## Login sessions, linger and the core's socket (Linux)
+
+The core listens under the login runtime dir (`/run/user/<uid>`, the
+`XDG_RUNTIME_DIR` of every ssh login) when a systemd user manager is
+up, and beside its state (`~/.local/state/herdr-core/`) when it is not.
+An install started from a non-login context (sudo -u, cron,
+cloud-init) before the first login would otherwise leave a core that
+ssh logins cannot find — installed, but impossible to connect to.
+Right after installing the core, `install.sh` therefore:
+
+- tries to enable systemd **linger** for the user, best effort — it is
+  what keeps the user manager (and the runtime dir) alive with nobody
+  logged in. If enabling fails, the script prints the exact
+  `sudo loginctl enable-linger <user>` command instead of failing
+  silently;
+- points its own `hc` calls at the runtime dir, the way a login does;
+- restarts a core that is already listening beside its state onto the
+  runtime dir — **only while it serves no live terminals**: their
+  holders live beside the old socket, and a move would end them. With
+  live terminals the core stays where it is, the script talks to it
+  there, and the warning it prints explains how to converge later.
+
+If that restart (or a reboot) does end the pre-created space's
+terminal, the next run repairs the space in place — see below.
+
 ## Idempotency and rollback
 
 - Re-running `install.sh` is safe: an existing Pi is skipped, and
   `precreate.py` checks the `herdr-app` document first — if a space with
-  the target name already exists, it reports that and creates nothing.
+  the target name already exists and its terminal is live, it reports
+  that and creates nothing. If that terminal has finished (or is gone),
+  the space is repaired in place: a fresh terminal is created, the
+  space's tab is repointed at it, and it is labelled into the space.
 - herdr-core is simply replaced in place (same path, same symlink).
 - If space pre-creation fails after its terminal was created, the
   terminal is killed and removed again: no half-created space, no orphan
