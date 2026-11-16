@@ -165,8 +165,9 @@ pub(super) async fn start(
         if let Some(display) = &p.display {
             display.apply(&mut screen);
         }
+        let dark = screen.display_dark();
         st.screens.insert(id, screen);
-        let (env, scope) = terminal_env(core, id, &cwd, env);
+        let (env, scope) = terminal_env(core, id, &cwd, env, dark);
         st.reg.terminals.get_mut(&id).expect("just created").scope = Some(scope);
         let (tx, rx) = tokio::sync::oneshot::channel();
         st.pending.insert(id, tx);
@@ -208,15 +209,27 @@ pub(super) async fn start(
     }
 }
 
+/// The `COLORFGBG` a program starting on a display of this scheme reads:
+/// the conventional palette indexes of that scheme's own foreground on its
+/// background. Programs that pick a light/dark theme from it (Pi is one)
+/// only read the background index.
+fn colorfgbg(dark: bool) -> &'static str {
+    if dark { "15;0" } else { "0;15" }
+}
+
 /// Per-program runtime fields, shared by initial runs and replacement shells.
 pub(crate) fn terminal_env(
     core: &Core,
     id: u32,
     cwd: &str,
     mut env: BTreeMap<String, String>,
+    dark: bool,
 ) -> (BTreeMap<String, String>, String) {
     env.insert("HC_TERMINAL_ID".into(), crate::terminals::address(id));
     env.insert("HC_TERMINAL_SOCKET".into(), core.paths.socket.display().to_string());
+    // The display wins over any inherited value: it is the scheme the
+    // program is actually about to be painted on.
+    env.insert("COLORFGBG".into(), colorfgbg(dark).into());
     let scope = crate::sweep::token();
     env.insert(crate::sweep::VAR.into(), scope.clone());
     // Preserve the requested spelling, including symlinks.
@@ -252,6 +265,12 @@ pub(crate) fn child_env(base: BTreeMap<String, String>, extra: BTreeMap<String, 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn colorfgbg_names_the_scheme_the_program_starts_on() {
+        assert_eq!(super::colorfgbg(true), "15;0");
+        assert_eq!(super::colorfgbg(false), "0;15");
+    }
+
     #[test]
     fn a_long_output_keeps_whole_lines_from_its_end_even_mid_character() {
         let text = "é".repeat(30_000) + "\nlast line";

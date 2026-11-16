@@ -84,6 +84,9 @@ impl Core {
         for id in ids {
             let Some(holder) = st.current() else { break };
             let instance = holder.instance.clone();
+            // A screen that survived carries its display scheme; without one
+            // the replacement shell starts on the dark factory default.
+            let dark = st.screens.get(&id).is_none_or(|s| s.display_dark());
             let t = st.reg.terminals.get_mut(&id).expect("pending");
             let env = crate::api::child_env(base_env.clone(), t.restart_env.clone());
             let cwd = t
@@ -95,7 +98,7 @@ impl Core {
                 .unwrap_or_else(|| {
                     env.get("HOME").or_else(|| env.get("USERPROFILE")).cloned().unwrap_or_else(|| "/".into())
                 });
-            let (env, scope) = crate::api::terminal_env(&self, id, &cwd, env);
+            let (env, scope) = crate::api::terminal_env(&self, id, &cwd, env, dark);
             t.scope = Some(scope);
             t.holder = Some(instance);
             t.argv = shell.clone();

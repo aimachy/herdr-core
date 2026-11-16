@@ -48,6 +48,27 @@ fn initial_display_answers_the_programs_first_color_query() {
 }
 
 #[test]
+fn programs_learn_the_display_scheme_from_colorfgbg() {
+    use serde_json::{Value, json};
+    let s = Session::new();
+    s.json(&["server", "start"]);
+    let mut conn = s.connect();
+    // Programs that pick a light/dark theme from COLORFGBG (Pi is one) must be
+    // told the scheme of the display they are about to be painted on: the
+    // viewer's when the run carries one, the dark factory default otherwise.
+    for (id, display, expected) in
+        [(1, Value::Null, "15;0"), (2, json!({"bg": "#fbfcfb"}), "0;15"), (3, json!({"bg": "#101018"}), "15;0")]
+    {
+        let mut params = json!({"argv": ["sh", "-c", "printf %s \"$COLORFGBG\""], "wait": true});
+        if !display.is_null() {
+            params["display"] = display;
+        }
+        let reply = conn.call(id, "terminal.run", params);
+        assert_eq!(reply["result"]["output"].as_str().unwrap(), expected, "{reply}");
+    }
+}
+
+#[test]
 fn callers_use_the_cores_terminal_identity() {
     let mut s = Session::new();
     s.env.extend(

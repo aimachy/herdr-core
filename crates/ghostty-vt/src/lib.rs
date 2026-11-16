@@ -594,6 +594,12 @@ impl Terminal {
         }
     }
 
+    /// Whether the display background currently in effect is dark, by the
+    /// same weighted luminance `set_display` feeds the color-scheme report.
+    pub fn display_dark(&self) -> bool {
+        self.hooks.dark
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         let (cw, ch) = self.hooks.cell;
         unsafe { ffi::ghostty_terminal_resize(self.raw, cols.max(1), rows.max(1), cw, ch) };

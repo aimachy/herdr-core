@@ -258,6 +258,9 @@ paths start at your current folder. Prefer explicit paths for remote work.
   TERM=xterm-256color, COLORTERM=truecolor and TERM_PROGRAM=ghostty, with no
   TERM_PROGRAM_VERSION. The caller's identity is not forwarded. Explicit API
   `env` overrides still apply; kept replacement shells retain that identity.
+  COLORFGBG is set from the display the program starts on (`15;0` for a dark
+  background, `0;15` for a light one), so programs that pick a light/dark
+  theme from it start on the matching scheme.
   A local `DISPLAY` or `WAYLAND_DISPLAY` is left out only when its socket is
   missing or refuses connections. Host displays (including SSH forwarding) stay as they are.
   A missing `XAUTHORITY` file does not remove a display.
