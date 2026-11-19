@@ -1563,7 +1563,7 @@
       "name": "Apache-2.0"
     },
     "title": "herdr-core",
-    "version": "0.1.21"
+    "version": "0.1.22"
   },
   "methods": [
     {
@@ -3784,6 +3784,16 @@
       "name": "machine.add",
       "paramStructure": "by-name",
       "params": [
+        {
+          "description": "No password: let a login with no credentials speak first (a token\ngateway, whose user name is the credential): its host key is a\ndecision here, and a machine it signs in is added the ssh program's\nway, the trusted key recorded for ssh too. Set by the app's form\nwhen its password is left empty; without it, a passwordless add\ngoes straight to the ssh program, as before.",
+          "name": "auto",
+          "required": false,
+          "schema": {
+            "default": false,
+            "description": "No password: let a login with no credentials speak first (a token\ngateway, whose user name is the credential): its host key is a\ndecision here, and a machine it signs in is added the ssh program's\nway, the trusted key recorded for ssh too. Set by the app's form\nwhen its password is left empty; without it, a passwordless add\ngoes straight to the ssh program, as before.",
+            "type": "boolean"
+          }
+        },
         {
           "description": "The machine's host (an IP or a name), with --user and --port: the\nform's way of giving a target, instead of a target or ~/.ssh/config.",
           "name": "host",

@@ -191,6 +191,14 @@ not applicable) and `logout_linger_user`, also in hello and server.status.
 
 `hc machine ls` lists configured machines; see
 `hc machine --help` to configure SSH or `--via <cmd>` connections.
+An add also takes a pasted ssh command (`ssh -p 2222 user@host`): it keeps
+the destination and the port it names, and names any other ssh option
+instead of guessing — those belong in ~/.ssh/config, whose hosts an add
+takes by name. A server that offers no password login but signs the user
+name in alone (a token gateway) is not a dead end: when a password was
+given and refused that way, or an add runs with `--auto`, the add proves
+the no-credential login and adds the machine the ssh program's way,
+recording the host key a person trusted in ~/.ssh/known_hosts.
 Without `--name`, SSH machines use the first host label (IPs stay whole),
 shortened to 32 characters with `-2`, `-3`, etc. added if the name is taken
 or looks like a terminal id (`t14` becomes `t14-2`).

@@ -52,6 +52,11 @@ pub(super) fn machine(
     let s = |v: &Value| v.as_str().unwrap_or_default().to_string();
     Ok(match action {
         MachineCmd::Add(mut p) => {
+            // A pasted ssh command line, taken down to its target first,
+            // so the login, the install and the core all see the same one.
+            if let Some(target) = &p.target {
+                p.target = Some(crate::machines::normalize_target(target)?);
+            }
             let target = match &p.host {
                 Some(host) => crate::machines::compose_target(host, p.user.as_deref(), p.port),
                 None => p.via.clone().or_else(|| p.target.clone().map(crate::machines::ssh_target)).unwrap_or_default(),

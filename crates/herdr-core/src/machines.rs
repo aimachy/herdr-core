@@ -155,6 +155,182 @@ pub fn ssh_target(target: String) -> String {
     }
 }
 
+/// An ssh option token taken apart: its name and any value stuck to it
+/// (`-p2222` -> (`-p`, `2222`), `--opt=v` -> (`--opt`, `v`)).
+fn option_parts(tok: &str) -> (&str, Option<&str>) {
+    if tok.starts_with("--") {
+        return match tok.split_once('=') {
+            Some((name, value)) => (name, Some(value)),
+            None => (tok, None),
+        };
+    }
+    let name_len = tok.chars().take(2).map(|c| c.len_utf8()).sum::<usize>();
+    let (name, rest) = tok.split_at(name_len.min(tok.len()));
+    (name, if rest.is_empty() { None } else { Some(rest) })
+}
+
+/// A target's host part taken apart as written: the host (an IPv6 literal
+/// keeps its brackets) and the port it names, if any. A non-numeric port
+/// stays part of the host, as in machines_russh's parse_target. None: a
+/// bracket that never closes, or junk after it.
+fn split_host_port(hostport: &str) -> Option<(String, Option<String>)> {
+    if let Some(rest) = hostport.strip_prefix('[') {
+        let (host, after) = rest.split_once(']')?;
+        let port = match after {
+            "" => None,
+            _ => Some(after.strip_prefix(':')?.to_string()),
+        };
+        if port.as_ref().is_some_and(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit())) {
+            return None;
+        }
+        return Some((format!("[{host}]"), port));
+    }
+    match hostport.split_once(':') {
+        Some((host, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => {
+            Some((host.to_string(), Some(p.to_string())))
+        }
+        _ => Some((hostport.to_string(), None)),
+    }
+}
+
+/// A pasted ssh command line (`ssh -p 2222 can@rohan`, `ssh rohan -p 2222`),
+/// taken down to the target an add stores: the destination, with the user
+/// and the port the command names (a `-p` after the destination counts
+/// too: people write it there). An option an add cannot carry (-i, -J,
+/// -o, …) is named in the error: it belongs in ~/.ssh/config, whose hosts
+/// an add takes by name. Anything that is not an ssh command line comes
+/// back as it was (trimmed), so plain targets read as before.
+pub fn normalize_target(input: &str) -> Result<String, RpcError> {
+    let trimmed = input.trim();
+    let mut words = trimmed.split_whitespace();
+    if words.next() != Some("ssh") {
+        return Ok(trimmed.to_string());
+    }
+    let bad = || RpcError::invalid_params(format!("bad ssh target {trimmed:?}"));
+    let rest: Vec<&str> = words.collect();
+    let (mut user, mut port, mut dest) = (None, None, None);
+    let mut positional_only = false;
+    let mut i = 0;
+    while i < rest.len() {
+        let tok = rest[i];
+        i += 1;
+        if !positional_only && tok == "--" {
+            positional_only = true;
+            continue;
+        }
+        if !positional_only && tok.starts_with('-') && tok.len() > 1 {
+            let (name, attached) = option_parts(tok);
+            if name != "-p" && name != "-l" {
+                return Err(RpcError::invalid_params(format!(
+                    "that ssh command uses {name}, which an add cannot carry"
+                ))
+                .with_hint("put the option in ~/.ssh/config and add the host by its name there"));
+            }
+            let value = match attached {
+                Some(v) => v,
+                None => {
+                    let Some(v) = rest.get(i) else {
+                        return Err(RpcError::invalid_params(format!("ssh's {name} option needs a value after it")));
+                    };
+                    i += 1;
+                    v
+                }
+            };
+            if name == "-p" {
+                if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(RpcError::invalid_params(format!(
+                        "ssh's -p option needs a port number, not {value:?}"
+                    )));
+                }
+                port = Some(value);
+            } else {
+                user = Some(value);
+            }
+            continue;
+        }
+        if dest.is_none() {
+            dest = Some(tok);
+            continue;
+        }
+        return Err(RpcError::invalid_params(format!(
+            "an add names one machine; {tok:?} is a command, not part of its address"
+        ))
+        .with_hint("add the machine first, then run commands in its terminals"));
+    }
+    let Some(dest) = dest else {
+        return Err(RpcError::invalid_params("that ssh command names no machine to add"));
+    };
+    let (dest_user, hostport) = match dest.rsplit_once('@') {
+        Some((u, h)) if !u.is_empty() => (Some(u), h),
+        _ => (None, dest),
+    };
+    let Some((host, dest_port)) = split_host_port(hostport) else { return Err(bad()) };
+    if host.is_empty() || host == "[]" {
+        return Err(bad());
+    }
+    let user = dest_user.or(user);
+    let port = port.map(str::to_string).or(dest_port);
+    let mut out = match user {
+        Some(u) => format!("{u}@{host}"),
+        None => host,
+    };
+    if let Some(p) = port {
+        // A host still carrying a colon (a port parse_target reads as part
+        // of the name, or a bare IPv6 literal) takes no suffix.
+        if !out.contains(':') || out.contains(']') {
+            out = format!("{out}:{p}");
+        }
+    }
+    Ok(out)
+}
+
+/// The ~/.ssh/known_hosts line that records trust in a host key, in the
+/// form ssh itself writes it: `[host]:port` away from port 22, an IPv6
+/// literal in brackets either way.
+pub fn known_hosts_line(host: &str, port: u16, openssh_key: &str) -> String {
+    let named = if host.contains(':') { format!("[{host}]") } else { host.to_string() };
+    match port {
+        22 => format!("{named} {openssh_key}"),
+        _ if host.contains(':') => format!("{named}:{port} {openssh_key}"),
+        _ => format!("[{named}]:{port} {openssh_key}"),
+    }
+}
+
+/// Records a host key a person trusted during an add (its fingerprint
+/// passed back as --trust-host-key) in ~/.ssh/known_hosts, so the ssh
+/// program — the way this machine is reached — honors the same yes.
+/// A host already named there, with any key, is left as it is: ssh's own
+/// warning is the guide then.
+pub fn record_trusted_host_key(target: &str, openssh_key: &str) -> Result<(), RpcError> {
+    let t = crate::machines_russh::parse_target(target)?;
+    let line = known_hosts_line(&t.host, t.port, openssh_key);
+    let host_field = line.split_whitespace().next().unwrap_or_default().to_string();
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| RpcError::internal("cannot find the home folder to record the trusted host key"))?;
+    let dir = home.join(".ssh");
+    let file = dir.join("known_hosts");
+    let already = std::fs::read_to_string(&file)
+        .is_ok_and(|text| text.lines().any(|l| l.split_whitespace().next() == Some(host_field.as_str())));
+    if already {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| RpcError::internal(format!("cannot make {}: {e}", dir.display())))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file)
+        .map_err(|e| RpcError::internal(format!("cannot open {}: {e}", file.display())))?;
+    writeln!(f, "{line}").map_err(|e| RpcError::internal(format!("cannot write {}: {e}", file.display())))?;
+    Ok(())
+}
+
 /// A free name from the target's host: `can@rohan.lan` -> `rohan`; IPs stay whole.
 pub fn default_name(target: &str, taken: impl Fn(&str) -> bool) -> Option<String> {
     let t = target.strip_prefix("ssh://").unwrap_or(target);
@@ -875,6 +1051,53 @@ mod tests {
             );
         }
         assert_eq!(default_name("t14!", |_| false), None);
+    }
+
+    #[test]
+    fn a_pasted_ssh_command_comes_down_to_its_target() {
+        let n = |s: &str| normalize_target(s).unwrap();
+        assert_eq!(n("ssh -p 2222 can@rohan"), "can@rohan:2222");
+        assert_eq!(n("ssh can@rohan -p 2222"), "can@rohan:2222");
+        assert_eq!(n("ssh can@rohan"), "can@rohan");
+        assert_eq!(n("ssh -p2222 rohan"), "rohan:2222");
+        assert_eq!(n("ssh -l can rohan"), "can@rohan");
+        assert_eq!(n("ssh -l can -p 2222 rohan"), "can@rohan:2222");
+        assert_eq!(n("ssh -p 2222 can@[::1]"), "can@[::1]:2222");
+        assert_eq!(n("  ssh   -p   2222   can@rohan  "), "can@rohan:2222");
+        assert_eq!(n("ssh can@rohan:2222"), "can@rohan:2222");
+        // Not commands: back as they were.
+        assert_eq!(n("can@rohan:2222"), "can@rohan:2222");
+        assert_eq!(n("ssh://can@rohan:2222"), "ssh://can@rohan:2222");
+        assert_eq!(n("rohan"), "rohan");
+        assert_eq!(n("sshbox"), "sshbox");
+    }
+
+    #[test]
+    fn a_pasted_ssh_command_names_what_it_cannot_carry() {
+        for (input, named) in [
+            ("ssh -i key can@rohan", "-i"),
+            ("ssh -J jump can@rohan", "-J"),
+            ("ssh -o StrictHostKeyChecking=no can@rohan", "-o"),
+            ("ssh --foo can@rohan", "--foo"),
+        ] {
+            let e = normalize_target(input).unwrap_err();
+            assert!(e.message.contains(named), "{input}: {}", e.message);
+        }
+        assert!(normalize_target("ssh").is_err());
+        assert!(normalize_target("ssh -p 2222").is_err());
+        assert!(normalize_target("ssh -p x can@rohan").is_err());
+        assert!(normalize_target("ssh -p").is_err());
+        let e = normalize_target("ssh can@rohan ls").unwrap_err();
+        assert!(e.message.contains("ls"), "{}", e.message);
+    }
+
+    #[test]
+    fn a_known_hosts_line_reads_as_ssh_writes_it() {
+        let key = "ssh-ed25519 AAAA";
+        assert_eq!(known_hosts_line("rohan", 22, key), "rohan ssh-ed25519 AAAA");
+        assert_eq!(known_hosts_line("ssh.instabox.sh", 2222, key), "[ssh.instabox.sh]:2222 ssh-ed25519 AAAA");
+        assert_eq!(known_hosts_line("::1", 22, key), "[::1] ssh-ed25519 AAAA");
+        assert_eq!(known_hosts_line("::1", 2222, key), "[::1]:2222 ssh-ed25519 AAAA");
     }
 
     #[test]

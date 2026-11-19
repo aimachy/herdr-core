@@ -633,9 +633,47 @@ fn free_name(core: &Core, st: &crate::runtime::State, name: &str) -> Result<(), 
     Ok(())
 }
 
+/// A password add's login: in with the password once, this core's key
+/// planted there, and the pair to pin in the record (the host key's
+/// fingerprint, the planted key's file name).
+async fn password_login(
+    state: &std::path::Path,
+    target: &str,
+    name: &str,
+    password: &str,
+    trust: Option<&str>,
+) -> Result<(String, String), RpcError> {
+    let session =
+        crate::machines_russh::open(target, crate::machines_russh::Auth::Password(password.to_string()), trust).await?;
+    let (key_file, line) = crate::machines::ensure_planted_key(state, name)?;
+    let (status, _out, err) = session.exec(&crate::machines_russh::plant_line(&line)).await?;
+    if status != 0 {
+        let why = String::from_utf8_lossy(&err);
+        let why = why.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("no reason given");
+        return Err(RpcError::new(
+            "install_failed",
+            format!("planting the login key on {target} failed: {why}"),
+            "the password login worked; nothing else was changed there",
+        ));
+    }
+    let pin = (session.fingerprint.clone(), key_file);
+    drop(session);
+    Ok(pin)
+}
+
+/// Records a probed host key in ~/.ssh/known_hosts, when the trust a
+/// person passed back is the key the probe saw: the machine is being
+/// added the ssh program's way, and ssh must honor the same yes.
+fn trust_probed_key(target: &str, trust: Option<&str>, probe: &crate::machines_russh::Probe) -> Result<(), RpcError> {
+    if trust == Some(probe.fingerprint.as_str()) {
+        crate::machines::record_trusted_host_key(target, &probe.openssh_key)?;
+    }
+    Ok(())
+}
+
 async fn machine_add(core: Ctx<'_>, p: MachineAddParams) -> Result<crate::machines::Machine, RpcError> {
     let (target, via) = match (p.target, p.via, p.host) {
-        (Some(target), None, _) => (crate::machines::ssh_target(target), false),
+        (Some(target), None, _) => (crate::machines::ssh_target(crate::machines::normalize_target(&target)?), false),
         (None, Some(command), _) => (command, true),
         (None, None, Some(host)) => (crate::machines::compose_target(&host, p.user.as_deref(), p.port), false),
         _ => return Err(RpcError::invalid_params("give a target, a via command, or a host")),
@@ -665,25 +703,44 @@ async fn machine_add(core: Ctx<'_>, p: MachineAddParams) -> Result<crate::machin
             return Err(RpcError::invalid_params("a password goes with an ssh target, not --via"));
         }
         let name_now = name(&core.lock())?;
-        let session = crate::machines_russh::open(
-            &target,
-            crate::machines_russh::Auth::Password(password.clone()),
-            p.trust_host_key.as_deref(),
-        )
-        .await?;
-        let (key_file, line) = crate::machines::ensure_planted_key(&core.paths.state, &name_now)?;
-        let (status, _out, err) = session.exec(&crate::machines_russh::plant_line(&line)).await?;
-        if status != 0 {
-            let why = String::from_utf8_lossy(&err);
-            let why = why.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("no reason given");
-            return Err(RpcError::new(
-                "install_failed",
-                format!("planting the login key on {target} failed: {why}"),
-                "the password login worked; nothing else was changed there",
-            ));
+        match password_login(&core.paths.state, &target, &name_now, password, p.trust_host_key.as_deref()).await {
+            Ok(pin) => pinned = Some(pin),
+            Err(e) => {
+                // A server that offers no password logins at all may still
+                // sign the user name in alone (a token gateway): probe
+                // that, and let the route decide — the ssh program's way
+                // in, or the refusal stands.
+                let outcome = if e.kind == "password_auth_disabled" {
+                    crate::machines_russh::PasswordOutcome::NotOffered
+                } else {
+                    crate::machines_russh::PasswordOutcome::Refused
+                };
+                let probe = match outcome {
+                    crate::machines_russh::PasswordOutcome::NotOffered => {
+                        crate::machines_russh::probe_none(&target, p.trust_host_key.as_deref()).await.ok()
+                    }
+                    _ => None,
+                };
+                match crate::machines_russh::add_route(outcome, probe.is_some()) {
+                    crate::machines_russh::AddRoute::SystemSsh => {
+                        if let Some(probe) = &probe {
+                            trust_probed_key(&target, p.trust_host_key.as_deref(), probe)?;
+                        }
+                    }
+                    _ => return Err(e),
+                }
+            }
         }
-        pinned = Some((session.fingerprint.clone(), key_file));
-        drop(session);
+    } else if p.auto && !via {
+        // The form's password was left empty: a login with no credentials
+        // speaks first, so a token gateway's host key is a decision here
+        // and its trust is recorded for the ssh program too. A refusal
+        // changes nothing: the ssh program may still get in with a key.
+        match crate::machines_russh::probe_none(&target, p.trust_host_key.as_deref()).await {
+            Ok(probe) => trust_probed_key(&target, p.trust_host_key.as_deref(), &probe)?,
+            Err(e) if e.kind == "host_key" => return Err(e),
+            Err(_) => {}
+        }
     }
     let to = match &pinned {
         Some((fingerprint, key_file)) => {

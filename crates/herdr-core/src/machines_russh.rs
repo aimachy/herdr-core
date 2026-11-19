@@ -58,20 +58,25 @@ pub fn parse_target(target: &str) -> Result<Target, RpcError> {
 }
 
 /// A server key's identity: its SHA256 fingerprint (`SHA256:…`, the form
-/// ssh itself prints) and its algorithm name.
-fn key_identity(key: &PublicKeyOrCertificate) -> (String, String) {
+/// ssh itself prints), its algorithm name, and the key itself in the
+/// OpenSSH form a known_hosts line carries.
+fn key_identity(key: &PublicKeyOrCertificate) -> (String, String, String) {
     let public: russh::keys::PublicKey = match key {
         PublicKeyOrCertificate::PublicKey { key, .. } => key.clone(),
         PublicKeyOrCertificate::Certificate(cert) => cert.public_key().clone().into(),
     };
-    (public.fingerprint(russh::keys::ssh_key::HashAlg::Sha256).to_string(), public.algorithm().to_string())
+    (
+        public.fingerprint(russh::keys::ssh_key::HashAlg::Sha256).to_string(),
+        public.algorithm().to_string(),
+        public.to_openssh().unwrap_or_default(),
+    )
 }
 
 /// Captures the server key and lets it through only when it is the pinned
 /// (or just-confirmed) one: the TOFU gate.
 struct HostKey {
     expected: Option<String>,
-    seen: Arc<Mutex<Option<(String, String)>>>,
+    seen: Arc<Mutex<Option<(String, String, String)>>>,
 }
 
 impl Handler for HostKey {
@@ -136,10 +141,14 @@ fn password_auth_disabled_error(target: &Target, user: &str) -> RpcError {
 }
 
 /// How a session authenticates. A password is never stored; it plants a key
-/// (see `new_key`) and the key is used from then on.
+/// (see `new_key`) and the key is used from then on. `None` signs in with
+/// no credentials at all: a gateway whose user name carries the credential
+/// (a token, say) accepts it. An add probes it (see `probe_none`); it is
+/// never a machine's standing login.
 pub enum Auth {
     Password(String),
     Key(PrivateKey),
+    None,
 }
 
 /// An authenticated embedded-ssh session to one machine.
@@ -147,6 +156,47 @@ pub struct Session {
     handle: Handle<HostKey>,
     /// The server key's SHA256 fingerprint, as presented and accepted.
     pub fingerprint: String,
+    /// The server key in OpenSSH form, as a known_hosts line carries it.
+    pub openssh_key: String,
+}
+
+/// What an add's password login observed, when there was one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PasswordOutcome {
+    /// No password was given.
+    NotGiven,
+    /// The password signed in.
+    SignedIn,
+    /// The server does not offer password logins at all.
+    NotOffered,
+    /// The server offers them and refused (or the attempt broke off).
+    Refused,
+}
+
+/// How an add reaches the machine, once its logins are decided.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AddRoute {
+    /// The embedded way: the planted key signs in, the host key is pinned.
+    Embedded,
+    /// The ssh program's way: no planted key, no pin.
+    SystemSsh,
+    /// No route: the password attempt's error stands.
+    Failed,
+}
+
+/// Decides an add's route from what its logins observed, apart from the
+/// IO that observed it. A server that takes no passwords at all is not
+/// always a dead end: a gateway that signs the user name in alone (the
+/// name carries a token) answers a login with no credentials, and such a
+/// machine is added the ssh program's way — the same login, through ssh
+/// itself — instead of being told to change its sshd.
+pub fn add_route(password: PasswordOutcome, none_signed_in: bool) -> AddRoute {
+    match password {
+        PasswordOutcome::SignedIn => AddRoute::Embedded,
+        PasswordOutcome::NotOffered if none_signed_in => AddRoute::SystemSsh,
+        PasswordOutcome::NotOffered | PasswordOutcome::Refused => AddRoute::Failed,
+        PasswordOutcome::NotGiven => AddRoute::SystemSsh,
+    }
 }
 
 pub async fn open(target: &str, auth: Auth, expected: Option<&str>) -> Result<Session, RpcError> {
@@ -164,7 +214,7 @@ pub async fn open(target: &str, auth: Auth, expected: Option<&str>) -> Result<Se
         Ok(handle) => handle,
         Err(e) => {
             // A refused host key is a decision for a person, not a failure.
-            if let Some((fingerprint, algo)) = seen.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+            if let Some((fingerprint, algo, _)) = seen.lock().unwrap_or_else(|p| p.into_inner()).clone() {
                 return Err(host_key_error(&t, &fingerprint, &algo, expected.is_some()));
             }
             return Err(RpcError::new(
@@ -179,6 +229,7 @@ pub async fn open(target: &str, auth: Auth, expected: Option<&str>) -> Result<Se
         Auth::Key(key) => {
             handle.authenticate_publickey(user.as_str(), PrivateKeyWithHashAlg::new(Arc::new(key.clone()), None)).await
         }
+        Auth::None => handle.authenticate_none(user.as_str()).await,
     };
     match result {
         Ok(AuthResult::Success) => {}
@@ -197,15 +248,42 @@ pub async fn open(target: &str, auth: Auth, expected: Option<&str>) -> Result<Se
                     format!("{} refused the planted key for {user}", t.host),
                     "remove the machine and add it again with its password",
                 ),
+                Auth::None => RpcError::new(
+                    "needs_login",
+                    format!("{} does not sign {user} in with no credentials", t.host),
+                    "add it with a password, or with a key the ssh program can use",
+                ),
             });
         }
         Err(e) => {
             return Err(RpcError::new("unreachable", format!("the login to {} broke off: {e}", t.host), ""));
         }
     }
-    let fingerprint =
-        seen.lock().unwrap_or_else(|p| p.into_inner()).clone().map(|(fingerprint, _)| fingerprint).unwrap_or_default();
-    Ok(Session { handle, fingerprint })
+    let (fingerprint, openssh_key) = seen
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+        .map(|(fingerprint, _, openssh)| (fingerprint, openssh))
+        .unwrap_or_default();
+    Ok(Session { handle, fingerprint, openssh_key })
+}
+
+/// The answer of a no-credentials probe: the host key the server
+/// presented (its fingerprint and its OpenSSH form), once it signed the
+/// user name in. The connection itself is dropped: the probe only proves
+/// the way in, it is not the machine's pipe.
+pub struct Probe {
+    pub fingerprint: String,
+    pub openssh_key: String,
+}
+
+/// Signs in with no credentials, to prove a gateway that takes the user
+/// name alone lets this target in. The host-key gate is the same TOFU as
+/// any embedded login: an untrusted key stops the probe with a `host_key`
+/// error, and only the trusted fingerprint gets in.
+pub async fn probe_none(target: &str, expected: Option<&str>) -> Result<Probe, RpcError> {
+    let session = open(target, Auth::None, expected).await?;
+    Ok(Probe { fingerprint: session.fingerprint, openssh_key: session.openssh_key })
 }
 
 /// Output kept from one `exec`: enough for a script's verdict, not a stream.
@@ -443,6 +521,26 @@ mod tests {
         // The command rides the hint, alone on its last line, so a person
         // (or the app) can lift it out whole.
         assert_eq!(e.hint.lines().last(), Some(enable_password_command("can").as_str()), "{}", e.hint);
+    }
+
+    #[test]
+    fn an_adds_route_is_decided_by_what_its_logins_observed() {
+        use AddRoute::*;
+        use PasswordOutcome::*;
+        // A password that signed in: the embedded way, probe or not.
+        assert_eq!(add_route(SignedIn, false), Embedded);
+        assert_eq!(add_route(SignedIn, true), Embedded);
+        // No password offered, but the user name alone signed in (a token
+        // gateway): the ssh program's way.
+        assert_eq!(add_route(NotOffered, true), SystemSsh);
+        // No password offered and nothing else signed in: the refusal stands.
+        assert_eq!(add_route(NotOffered, false), Failed);
+        // A refused password is a wrong password, whatever else answers.
+        assert_eq!(add_route(Refused, true), Failed);
+        assert_eq!(add_route(Refused, false), Failed);
+        // No password given: the ssh program's way, as before.
+        assert_eq!(add_route(NotGiven, false), SystemSsh);
+        assert_eq!(add_route(NotGiven, true), SystemSsh);
     }
 
     #[test]

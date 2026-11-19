@@ -791,6 +791,15 @@ pub struct MachineAddParams {
     #[arg(long = "trust-host-key", value_name = "SHA256:…")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trust_host_key: Option<String>,
+    /// No password: let a login with no credentials speak first (a token
+    /// gateway, whose user name is the credential): its host key is a
+    /// decision here, and a machine it signs in is added the ssh program's
+    /// way, the trusted key recorded for ssh too. Set by the app's form
+    /// when its password is left empty; without it, a passwordless add
+    /// goes straight to the ssh program, as before.
+    #[arg(long)]
+    #[serde(default)]
+    pub auto: bool,
     /// Reach it with this command instead of ssh: it is given a shell line to
     /// run there as its last argument, like ssh (`ssh -p 2222 -i key user@ip`,
     /// `fly ssh console -a app --pty=false -C`). It must pass bytes both ways
